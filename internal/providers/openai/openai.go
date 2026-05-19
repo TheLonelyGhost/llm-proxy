@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
@@ -77,9 +78,12 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 	if err := config.DecodeBackend(block, &s); err != nil {
 		return nil, err
 	}
+	hasExplicitBaseURL := s.BaseURL != ""
 	s.applyDefaults()
 
-	if s.APIKey == "" && s.BaseURL == DefaultBaseURL {
+	s.BaseURL = strings.TrimSuffix(s.BaseURL, "/v1")
+
+	if s.APIKey == "" && !hasExplicitBaseURL {
 		return nil, fmt.Errorf("openai backend %q: api_key is required unless base_url is specified", block.Name)
 	}
 
@@ -139,7 +143,7 @@ func (p *Provider) Chat(ctx context.Context, req backend.ChatRequest) (*backend.
 	if err := p.allowed(req.Model); err != nil {
 		return nil, err
 	}
-	return p.forward(ctx, http.MethodPost, "/chat/completions", req.Body, req.Stream)
+	return p.forward(ctx, http.MethodPost, "/v1/chat/completions", req.Body, req.Stream)
 }
 
 // Complete forwards a legacy completions request.
@@ -147,7 +151,7 @@ func (p *Provider) Complete(ctx context.Context, req backend.CompletionRequest) 
 	if err := p.allowed(req.Model); err != nil {
 		return nil, err
 	}
-	return p.forward(ctx, http.MethodPost, "/completions", req.Body, req.Stream)
+	return p.forward(ctx, http.MethodPost, "/v1/completions", req.Body, req.Stream)
 }
 
 // Embed forwards an embeddings request.
@@ -155,5 +159,5 @@ func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*ba
 	if err := p.allowed(req.Model); err != nil {
 		return nil, err
 	}
-	return p.forward(ctx, http.MethodPost, "/embeddings", req.Body, false)
+	return p.forward(ctx, http.MethodPost, "/v1/embeddings", req.Body, false)
 }

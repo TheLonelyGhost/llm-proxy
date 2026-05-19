@@ -15,7 +15,6 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
-
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/openai"
@@ -148,7 +147,7 @@ func TestProvider_Chat(t *testing.T) {
 	var authHeader string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
-		if r.URL.Path != "/chat/completions" {
+		if r.URL.Path != "/v1/chat/completions" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		writeJSON(w, map[string]any{"id": "cmpl-1", "object": "chat.completion"})
@@ -181,7 +180,7 @@ models = ["gpt-4"]`, srv.URL))
 
 func TestProvider_Complete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/completions" {
+		if r.URL.Path != "/v1/completions" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		writeJSON(w, map[string]any{"id": "cmpl-1"})
@@ -211,7 +210,7 @@ models = ["gpt-3.5-turbo-instruct"]`, srv.URL))
 
 func TestProvider_Embed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/embeddings" {
+		if r.URL.Path != "/v1/embeddings" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
 		writeJSON(w, map[string]any{"data": []any{}})
@@ -265,5 +264,72 @@ models = ["model"]`, srv.URL))
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestProvider_ListUpstreamModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		writeJSON(w, map[string]any{
+			"object": "list",
+			"data": []map[string]any{
+				{"id": "gpt-4o", "object": "model", "created": 123, "owned_by": "openai"},
+				{"id": "gpt-4o-mini", "object": "model", "created": 456, "owned_by": "openai"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	block := buildBlock(t, fmt.Sprintf(`base_url = %q`, srv.URL))
+	p, err := openai.New(block, openai.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	models, err := p.ListUpstreamModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListUpstreamModels: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("models len = %d", len(models))
+	}
+	if models[0].ID != "gpt-4o" || models[1].ID != "gpt-4o-mini" {
+		t.Fatalf("models = %+v", models)
+	}
+	if models[0].Vendor != "OpenAI" {
+		t.Fatalf("vendor = %q", models[0].Vendor)
+	}
+	if models[0].Extras["owned_by"] != "openai" || models[0].Extras["created"] != "123" {
+		t.Fatalf("extras = %+v", models[0].Extras)
+	}
+}
+
+func TestProvider_ListUpstreamModels_SortsAndIgnoresMissingIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"object": "list",
+			"data": []map[string]any{
+				{"id": "z-model"},
+				{},
+				{"id": "a-model"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	block := buildBlock(t, fmt.Sprintf(`base_url = %q`, srv.URL))
+	p, err := openai.New(block, openai.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	models, err := p.ListUpstreamModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListUpstreamModels: %v", err)
+	}
+	if got := []string{models[0].ID, models[1].ID}; got[0] != "a-model" || got[1] != "z-model" {
+		t.Fatalf("sorted ids = %v", got)
 	}
 }
