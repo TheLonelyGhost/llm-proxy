@@ -17,7 +17,10 @@ Currently supported backends:
 - OpenAI-compatible endpoints: `/v1/chat/completions` (SSE streaming),
   `/v1/completions`, `/v1/embeddings`, `/v1/models`, plus `/healthz`.
 - HCL2 configuration: single file _or_ directory of `*.hcl` files; supports
-  `env("NAME")` interpolation so secrets never need to live on disk.
+  `env("NAME")` interpolation so secrets never need to live on disk. The
+  config path comes from `-c` / `--config`, then `LLM_PROXY_CONFIG`, then
+  `/etc/llm-proxy/config.hcl` on non-Windows or
+  `C:/ProgramData/llm-proxy/config.hcl` on Windows.
 - Prefix-based model routing (e.g. `copilot/gpt-4o`) so multiple backends can
   coexist in one proxy.
 - Mostly stateless. The only on-disk state is the GitHub OAuth token written

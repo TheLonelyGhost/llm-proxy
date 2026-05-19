@@ -42,9 +42,13 @@ func TestVersion(t *testing.T) {
 }
 
 func TestServe_MissingConfig(t *testing.T) {
+	t.Setenv("LLM_PROXY_CONFIG", filepath.Join(t.TempDir(), "missing.hcl"))
 	_, err := run(t, "serve")
 	if err == nil {
-		t.Fatal("expected error for missing --config")
+		t.Fatal("expected error for missing default config")
+	}
+	if !strings.Contains(err.Error(), "missing.hcl") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

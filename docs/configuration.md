@@ -1,6 +1,13 @@
 # Configuration
 
-`llm-proxy` is configured via [HCL2][hcl]. Point the `--config` flag at either:
+`llm-proxy` is configured via [HCL2][hcl]. Configuration is resolved in this
+order:
+
+1. `-c` / `--config`
+2. `LLM_PROXY_CONFIG`
+3. `/etc/llm-proxy/config.hcl` on non-Windows, or `C:/ProgramData/llm-proxy/config.hcl` on Windows
+
+The config path may point at either:
 
 - a single `*.hcl` file, or
 - a directory containing one or more `*.hcl` files (dot-files and non-`.hcl`
@@ -36,6 +43,9 @@ explicitly passed:
 
 - `--address <ip>` overrides `server.address`
 - `--port <int>` overrides `server.port`
+
+`-c` / `--config` is optional; if omitted, the proxy uses
+`LLM_PROXY_CONFIG` and then the platform default path above.
 
 Use `--log-level debug|info|warn|error` to control structured log verbosity.
 

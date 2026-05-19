@@ -21,11 +21,14 @@ const AppName = "llm-proxy"
 // ~/Library/Application Support/llm-proxy, and on Windows
 // %AppData%\llm-proxy. The directory is created (mode 0700) if missing.
 func ConfigDir() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user config dir: %w", err)
+	dir, ok := os.LookupEnv("LLM_PROXY_CONFIG_DIR")
+	if !ok {
+		base, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user config dir: %w", err)
+		}
+		dir = filepath.Join(base, AppName)
 	}
-	dir := filepath.Join(base, AppName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create config dir %q: %w", dir, err)
 	}
@@ -35,11 +38,14 @@ func ConfigDir() (string, error) {
 // CacheDir returns the cache directory used for short-lived state such as
 // exchanged provider tokens. The directory is created (mode 0700) if missing.
 func CacheDir() (string, error) {
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve user cache dir: %w", err)
+	dir, ok := os.LookupEnv("LLM_PROXY_CACHE_DIR")
+	if !ok {
+		base, err := os.UserCacheDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user cache dir: %w", err)
+		}
+		dir = filepath.Join(base, AppName)
 	}
-	dir := filepath.Join(base, AppName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create cache dir %q: %w", dir, err)
 	}

@@ -68,6 +68,9 @@ eval "$(llm-proxy ibm-bob extract --env)"
 llm-proxy ibm-bob extract -o ~/.config/llm-proxy/bob-secrets.json
 ```
 
+`llm-proxy` config follows the same precedence everywhere else: `-c` /
+`--config`, then `LLM_PROXY_CONFIG`, then the platform default path.
+
 Output (JSON form):
 
 ```json

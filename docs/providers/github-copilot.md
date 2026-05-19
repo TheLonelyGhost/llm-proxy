@@ -19,6 +19,9 @@ device-code flow:
 llm-proxy login --config /path/to/config.hcl
 ```
 
+If `--config` is omitted, `llm-proxy` uses `LLM_PROXY_CONFIG` or the
+platform default config path.
+
 The CLI prints a URL and one-time code. Open the URL in a browser, paste the
 code, and authorise the request. The resulting token is written to
 `<user-config-dir>/llm-proxy/github_token.json` with mode 0600. From then on

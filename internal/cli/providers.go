@@ -11,7 +11,6 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 )
@@ -57,7 +56,7 @@ func newProvidersListModelsCmd(out io.Writer) *cobra.Command {
 			"Backends that do not implement upstream listing return a clear error.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgPath)
+			cfg, err := loadConfig(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
@@ -84,12 +83,11 @@ func newProvidersListModelsCmd(out io.Writer) *cobra.Command {
 			return renderModels(out, models, verbose, jsonOut)
 		},
 	}
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", "", "path to HCL config file or directory (required)")
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", defaultConfigPath(), "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false,
 		"print supplemental metadata for each model")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit JSON instead of plain text (implies --verbose)")
-	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }
 

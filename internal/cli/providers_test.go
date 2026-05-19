@@ -5,16 +5,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestProvidersListModels_MissingConfig ensures the command refuses to run
-// without --config, mirroring the rest of the CLI.
-func TestProvidersListModels_MissingConfig(t *testing.T) {
+// TestProvidersListModels_DefaultConfigMissing ensures the command now falls
+// back to the platform default when no config source is specified.
+func TestProvidersListModels_DefaultConfigMissing(t *testing.T) {
+	t.Setenv("LLM_PROXY_CONFIG", filepath.Join(t.TempDir(), "missing.hcl"))
 	_, err := run(t, "providers", "list-models", "ibm-bob")
 	if err == nil {
-		t.Fatal("expected error for missing --config")
+		t.Fatal("expected error for missing default config")
 	}
 }
 

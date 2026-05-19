@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/copilot"
 )
@@ -23,7 +22,7 @@ func newLoginCmd(out io.Writer) *cobra.Command {
 			"persists the resulting token under the user's config dir with mode 0600. " +
 			"Subsequent `serve` invocations reuse this credential.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(cfgPath)
+			cfg, err := loadConfig(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
@@ -56,8 +55,7 @@ func newLoginCmd(out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", "", "path to HCL config file or directory (required)")
-	_ = cmd.MarkFlagRequired("config")
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", defaultConfigPath(), "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
 	return cmd
 }
 
@@ -66,8 +64,8 @@ func newLogoutCmd(out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Remove any persisted backend credentials",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			cfg, err := config.Load(cfgPath)
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
@@ -86,8 +84,7 @@ func newLogoutCmd(out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", "", "path to HCL config file or directory (required)")
-	_ = cmd.MarkFlagRequired("config")
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", defaultConfigPath(), "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
 	return cmd
 }
 

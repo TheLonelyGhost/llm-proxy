@@ -9,7 +9,6 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
-
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/copilot"
@@ -29,7 +28,7 @@ func newServeCmd(out io.Writer) *cobra.Command {
 		Use:   "serve",
 		Short: "Start the proxy HTTP server",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(cfgPath)
+			cfg, err := loadConfig(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
@@ -63,11 +62,10 @@ func newServeCmd(out io.Writer) *cobra.Command {
 			return srv.Run(ctx)
 		},
 	}
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", "", "path to HCL config file or directory (required)")
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", defaultConfigPath(), "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
 	cmd.Flags().StringVar(&address, "address", config.DefaultAddress, "interface address to bind")
 	cmd.Flags().IntVar(&port, "port", config.DefaultPort, "TCP port to bind")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
-	_ = cmd.MarkFlagRequired("config")
 	return cmd
 }
 
