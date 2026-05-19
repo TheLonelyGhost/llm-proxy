@@ -1,0 +1,115 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: "3"
+
+vars:
+  BINARY: llm-proxy
+  PKG: github.com/thelonelyghost/llm-proxy
+  COVER_THRESHOLD: 80
+
+env:
+  CGO_ENABLED: "0"
+
+tasks:
+  default:
+    desc: "Run lint, vet, and tests"
+    cmds:
+      - task: lint
+      - task: vet
+      - task: test
+
+  tools:install:
+    desc: "Install developer tooling (nilaway, govulncheck)"
+    cmds:
+      - go install go.uber.org/nilaway/cmd/nilaway@latest
+      - go install golang.org/x/vuln/cmd/govulncheck@latest
+
+  tidy:
+    desc: "Tidy go modules"
+    cmds:
+      - go mod tidy
+
+  build:
+    desc: "Build the binary for the current platform"
+    cmds:
+      - mkdir -p bin
+      - go build -trimpath -ldflags="-s -w" -o bin/{{.BINARY}} ./cmd/{{.BINARY}}
+
+  build:all:
+    desc: "Cross-compile for supported platforms (linux/darwin/windows × amd64/arm64)"
+    cmds:
+      - mkdir -p dist
+      - for: { var: PLATFORMS, split: " " }
+        cmd: |
+          IFS=/ read -r OS ARCH <<< "{{.ITEM}}"
+          EXT=""
+          if [ "$OS" = "windows" ]; then EXT=".exe"; fi
+          GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags="-s -w" \
+            -o dist/{{.BINARY}}-${OS}-${ARCH}${EXT} ./cmd/{{.BINARY}}
+    vars:
+      PLATFORMS: "linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
+
+  fmt:
+    desc: "Format Go source"
+    cmds:
+      - gofmt -s -w .
+
+  vet:
+    desc: "Run go vet"
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: "Run golangci-lint"
+    cmds:
+      - golangci-lint run ./...
+
+  vuln:
+    desc: "Run govulncheck"
+    cmds:
+      - govulncheck ./...
+
+  nilaway:
+    desc: "Run nilaway"
+    cmds:
+      - nilaway ./...
+
+  test:
+    desc: "Run unit tests with coverage"
+    cmds:
+      - go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out | tail -n 1
+
+  test:cover:
+    desc: "Enforce minimum coverage threshold"
+    cmds:
+      - task: test
+      - |
+        pct=$(go tool cover -func=coverage.out | awk '/total:/ {print $3}' | tr -d '%')
+        awk -v p="$pct" -v t="{{.COVER_THRESHOLD}}" 'BEGIN { if (p+0 < t+0) { printf "coverage %s%% < threshold %s%%\n", p, t; exit 1 } else { printf "coverage %s%% >= threshold %s%%\n", p, t } }'
+
+  fuzz:
+    desc: "Run all fuzz targets briefly (10s each)"
+    cmds:
+      - go test -run=^$ -fuzz=FuzzLoadHCL -fuzztime=10s ./internal/config
+      - go test -run=^$ -fuzz=FuzzParseModel -fuzztime=10s ./internal/router
+      - go test -run=^$ -fuzz=FuzzCanonicalString -fuzztime=10s ./internal/providers/ibmbob
+
+  check:
+    desc: "Full pre-commit pipeline: fmt, vet, lint, nilaway, vuln, test:cover"
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: lint
+      - task: nilaway
+      - task: vuln
+      - task: test:cover
+
+  run:
+    desc: "Run the proxy against examples/config.hcl"
+    cmds:
+      - go run ./cmd/{{.BINARY}} serve --config examples/config.hcl
+
+  clean:
+    desc: "Remove build artifacts"
+    cmds:
+      - rm -rf bin dist coverage.out

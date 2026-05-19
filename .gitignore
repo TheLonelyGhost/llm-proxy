@@ -1,0 +1,24 @@
+# Build artifacts
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local config / state (do not commit secrets)
+/local/
+*.local.hcl
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go
+vendor/
+
+# Fuzz corpus (keep curated corpora; ignore generated)
+testdata/fuzz/
+
+/*.hcl

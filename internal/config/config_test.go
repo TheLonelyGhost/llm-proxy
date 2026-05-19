@@ -1,0 +1,232 @@
+package config_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/thelonelyghost/llm-proxy/internal/config"
+)
+
+func writeFile(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestLoad_SingleFile(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "config.hcl", `
+server {
+  address = "0.0.0.0"
+  port    = 9999
+}
+
+backend "copilot" {
+  type   = "github-copilot"
+  models = ["gpt-4o", "claude-3.5-sonnet"]
+}
+`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.Address != "0.0.0.0" || cfg.Server.Port != 9999 {
+		t.Errorf("server = %+v", cfg.Server)
+	}
+	if len(cfg.Backends) != 1 || cfg.Backends[0].Name != "copilot" {
+		t.Errorf("backends = %+v", cfg.Backends)
+	}
+	if cfg.Backends[0].Type != "github-copilot" {
+		t.Errorf("type = %q", cfg.Backends[0].Type)
+	}
+	if len(cfg.Backends[0].Models) != 2 {
+		t.Errorf("models = %v", cfg.Backends[0].Models)
+	}
+}
+
+func TestLoad_Directory(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "01-server.hcl", `
+server { port = 5000 }
+`)
+	writeFile(t, dir, "02-backend.hcl", `
+backend "copilot" {
+  type = "github-copilot"
+}
+`)
+	writeFile(t, dir, ".hidden.hcl", `bogus`) // hidden -> ignored
+	writeFile(t, dir, "README.md", `not hcl`) // wrong ext -> ignored
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.Port != 5000 {
+		t.Errorf("port = %d", cfg.Server.Port)
+	}
+	if cfg.Server.Address != config.DefaultAddress {
+		t.Errorf("default address not applied: %q", cfg.Server.Address)
+	}
+	if len(cfg.Backends) != 1 {
+		t.Fatalf("backends = %v", cfg.Backends)
+	}
+}
+
+func TestLoad_Defaults(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "c.hcl", `
+backend "copilot" { type = "github-copilot" }
+`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.Address != config.DefaultAddress {
+		t.Errorf("addr = %q", cfg.Server.Address)
+	}
+	if cfg.Server.Port != config.DefaultPort {
+		t.Errorf("port = %d", cfg.Server.Port)
+	}
+}
+
+func TestLoad_EnvFunc(t *testing.T) {
+	t.Setenv("LLMPROXY_TEST_TOKEN", "secret123")
+	dir := t.TempDir()
+	p := writeFile(t, dir, "c.hcl", `
+backend "copilot" {
+  type   = "github-copilot"
+  models = [env("LLMPROXY_TEST_TOKEN")]
+}
+`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Backends[0].Models[0] != "secret123" {
+		t.Errorf("env interpolation failed: %v", cfg.Backends[0].Models)
+	}
+}
+
+func TestLoad_Errors(t *testing.T) {
+	t.Run("missing path", func(t *testing.T) {
+		if _, err := config.Load(filepath.Join(t.TempDir(), "nope.hcl")); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("empty dir", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := config.Load(dir)
+		if err == nil || !strings.Contains(err.Error(), "no .hcl files") {
+			t.Fatalf("want no-files error, got %v", err)
+		}
+	})
+	t.Run("wrong ext", func(t *testing.T) {
+		dir := t.TempDir()
+		p := writeFile(t, dir, "c.txt", `server {}`)
+		if _, err := config.Load(p); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("syntax error", func(t *testing.T) {
+		dir := t.TempDir()
+		p := writeFile(t, dir, "c.hcl", `server { port = `)
+		if _, err := config.Load(p); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("duplicate backend", func(t *testing.T) {
+		dir := t.TempDir()
+		p := writeFile(t, dir, "c.hcl", `
+backend "copilot" { type = "github-copilot" }
+backend "copilot" { type = "github-copilot" }
+`)
+		if _, err := config.Load(p); err == nil {
+			t.Fatal("expected duplicate error")
+		}
+	})
+	t.Run("missing type", func(t *testing.T) {
+		dir := t.TempDir()
+		p := writeFile(t, dir, "c.hcl", `backend "copilot" {}`)
+		if _, err := config.Load(p); err == nil {
+			t.Fatal("expected missing-type error")
+		}
+	})
+	t.Run("uppercase label", func(t *testing.T) {
+		dir := t.TempDir()
+		p := writeFile(t, dir, "c.hcl", `backend "Copilot" { type = "github-copilot" }`)
+		if _, err := config.Load(p); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("port out of range", func(t *testing.T) {
+		dir := t.TempDir()
+		p := writeFile(t, dir, "c.hcl", `server { port = 70000 }`)
+		if _, err := config.Load(p); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+}
+
+func TestDecodeBackend(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "c.hcl", `
+backend "copilot" {
+  type        = "github-copilot"
+  api_base    = "https://api.example.test"
+  request_timeout = "30s"
+}
+`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sub struct {
+		APIBase        string `hcl:"api_base,optional"`
+		RequestTimeout string `hcl:"request_timeout,optional"`
+	}
+	if err := config.DecodeBackend(cfg.Backends[0], &sub); err != nil {
+		t.Fatalf("DecodeBackend: %v", err)
+	}
+	if sub.APIBase != "https://api.example.test" {
+		t.Errorf("api_base = %q", sub.APIBase)
+	}
+	if sub.RequestTimeout != "30s" {
+		t.Errorf("timeout = %q", sub.RequestTimeout)
+	}
+}
+
+func FuzzLoadHCL(f *testing.F) {
+	seeds := []string{
+		`server { port = 1 }`,
+		`backend "x" { type = "y" }`,
+		`backend "x" { type = "y" models = ["a","b"] }`,
+		`# comment`,
+		``,
+		`server { address = env("FOO") }`,
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	dir := f.TempDir()
+	f.Fuzz(func(t *testing.T, body string) {
+		// Skip pathologically large inputs to keep the fuzzer brisk.
+		if len(body) > 8192 {
+			t.Skip()
+		}
+		p := filepath.Join(dir, "fuzz.hcl")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Loader must never panic on arbitrary input; returning an
+		// error is a perfectly acceptable outcome.
+		_, _ = config.Load(p)
+	})
+}

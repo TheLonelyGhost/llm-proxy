@@ -1,0 +1,124 @@
+# LLM Proxy
+
+An authenticating OpenAI-compatible HTTP proxy that fronts pluggable LLM
+backends. Clients talk to `llm-proxy` exactly as they would talk to the OpenAI
+API; the proxy strips the client's `Authorization` header, picks an upstream
+provider based on the requested model, injects the provider's own credentials,
+and forwards the request (streaming preserved).
+
+Currently supported backends:
+
+- **GitHub Copilot** (`type = "github-copilot"`)
+- **IBM Bob** (`type = "ibm-bob"`)
+
+## Features
+
+- OpenAI-compatible endpoints: `/v1/chat/completions` (SSE streaming),
+  `/v1/completions`, `/v1/embeddings`, `/v1/models`, plus `/healthz`.
+- HCL2 configuration: single file _or_ directory of `*.hcl` files; supports
+  `env("NAME")` interpolation so secrets never need to live on disk.
+- Prefix-based model routing (e.g. `copilot/gpt-4o`) so multiple backends can
+  coexist in one proxy.
+- Mostly stateless. The only on-disk state is the GitHub OAuth token written
+  by `llm-proxy login` (config dir, mode 0600) and the short-lived Copilot
+  API token cache (cache dir, mode 0600).
+- Secure defaults: binds to `127.0.0.1:4980`, refuses to silently default a
+  backend, enforces request body size limits, never logs request bodies or
+  tokens.
+
+## Quick start
+
+```sh
+# 1. Build
+task build
+
+# 2. Authorise the proxy with your GitHub Copilot subscription (one-time).
+./bin/llm-proxy login --config examples/config.hcl
+
+# 3. Run the server.
+./bin/llm-proxy serve --config examples/config.hcl
+
+# 4. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
+#    ask for a copilot-prefixed model.
+curl http://127.0.0.1:4980/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+```
+
+See [`docs/configuration.md`](docs/configuration.md) for the full HCL schema
+and [`docs/providers/github-copilot.md`](docs/providers/github-copilot.md) for
+Copilot-specific notes.
+
+For IBM Bob, the binary also ships a helper that recovers the upstream HMAC
+secret from your local `bob` install:
+
+```sh
+./bin/llm-proxy ibm-bob extract            # JSON, reads `bob` from $PATH
+./bin/llm-proxy ibm-bob extract --env      # shell exports
+./bin/llm-proxy ibm-bob extract /path/to/bob -o secrets.json
+```
+
+See [`docs/providers/ibm-bob.md`](docs/providers/ibm-bob.md) for details.
+
+## Listing upstream models
+
+To see which models a configured backend's upstream catalogue currently
+exposes (using the credentials the proxy already holds):
+
+```sh
+./bin/llm-proxy providers list-models <backend> -c examples/config.hcl
+```
+
+The positional argument is the HCL block label - for example `bob` when
+your config contains `backend "bob" { type = "ibm-bob" ... }`. Add
+`--verbose` to print supplemental metadata (vendor, capabilities, and any
+provider-specific extras) under each id, or `--json` for a machine-readable
+dump. For the GitHub Copilot backend, models the upstream marks as
+`policy.state = "disabled"` are omitted.
+
+## Building
+
+`task build` compiles for the current platform; `task build:all` cross-compiles
+for Linux, macOS, and Windows on both `amd64` and `arm64`. `CGO_ENABLED=0` is
+enforced.
+
+```sh
+task build         # bin/llm-proxy for host platform
+task build:all     # dist/llm-proxy-<os>-<arch>[.exe] for all supported targets
+```
+
+Supported platforms: Linux, macOS, Windows. Supported architectures: amd64,
+arm64.
+
+## Testing
+
+```sh
+task test          # unit tests with race detector and coverage
+task test:cover    # tests + enforces >= 80% coverage threshold
+task fuzz          # run fuzz targets (10 seconds each)
+task check         # fmt + vet + lint + nilaway + govulncheck + test:cover
+```
+
+Fuzz targets live in `internal/config` (HCL loader) and `internal/router`
+(model id parser).
+
+## Project layout
+
+```
+.
+├── cmd/llm-proxy/       # main package
+├── internal/
+│   ├── backend/         # Backend interface and registry
+│   ├── cli/             # cobra subcommands: serve, login, logout, providers, version
+│   ├── config/          # HCL2 schema + loader (file or directory)
+│   ├── paths/           # platform-aware config/cache directory helpers
+│   ├── providers/       # LLM backend implementations
+│   ├── router/          # `<backend>/<model>` parsing
+│   └── server/          # HTTP front door
+├── docs/                # additional documentation
+└── examples/config.hcl  # sample configuration
+```
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
