@@ -1,4 +1,4 @@
-// Package ibmbob implements the IBM Bob (bobshell) backend.
+// Package ibmbob implements the IBM Bob backend.
 //
 // The wire protocol mirrors the official `bob` CLI: API-key shape selects the
 // upstream host and authentication scheme, and HMAC-SHA256 request signing is
@@ -41,11 +41,11 @@ const (
 	embeddingsPath  = "/embeddings"
 	profilePath     = "/admin/v1/profile"
 
-	DefaultUserAgent     = "bobshell/0.0.0"
+	DefaultUserAgent     = "bobshell/1.0.4"
 	DefaultTimeout       = 300 * time.Second
 	DefaultMaxRetries    = 6
 	DefaultRetryDelay    = time.Second
-	DefaultPlatformTitle = "bobshell-llm-proxy"
+	DefaultPlatformTitle = "ibm-bob-llm-proxy"
 	defaultMetadataMode  = "default"
 	defaultIdentityTTL   = 30 * time.Minute
 )

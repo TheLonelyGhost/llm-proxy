@@ -10,6 +10,7 @@ Currently supported backends:
 
 - **GitHub Copilot** (`type = "github-copilot"`)
 - **IBM Bob** (`type = "ibm-bob"`)
+- **OpenAI** (`type = "openai"`)
 
 ## Features
 
@@ -45,20 +46,7 @@ curl http://127.0.0.1:4980/v1/chat/completions \
   -d '{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-See [`docs/configuration.md`](docs/configuration.md) for the full HCL schema
-and [`docs/providers/github-copilot.md`](docs/providers/github-copilot.md) for
-Copilot-specific notes.
-
-For IBM Bob, the binary also ships a helper that recovers the upstream HMAC
-secret from your local `bob` install:
-
-```sh
-./bin/llm-proxy ibm-bob extract            # JSON, reads `bob` from $PATH
-./bin/llm-proxy ibm-bob extract --env      # shell exports
-./bin/llm-proxy ibm-bob extract /path/to/bob -o secrets.json
-```
-
-See [`docs/providers/ibm-bob.md`](docs/providers/ibm-bob.md) for details.
+See [`docs/configuration.md`](docs/configuration.md) for the full HCL schema.
 
 ## Listing upstream models
 
@@ -73,7 +61,9 @@ The positional argument is the HCL block label - for example `bob` when
 your config contains `backend "bob" { type = "ibm-bob" ... }`. Add
 `--verbose` to print supplemental metadata (vendor, capabilities, and any
 provider-specific extras) under each id, or `--json` for a machine-readable
-dump. For the GitHub Copilot backend, models the upstream marks as
+dump.
+
+For the GitHub Copilot backend, models the upstream marks as
 `policy.state = "disabled"` are omitted.
 
 ## Building

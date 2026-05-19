@@ -2,8 +2,8 @@
 
 `type = "ibm-bob"`
 
-Routes OpenAI-compatible requests to the IBM Bob (`bobshell`) backend,
-reproducing the wire protocol used by the official `bob` CLI:
+Routes OpenAI-compatible requests to the IBM Bob backend, reproducing the
+wire protocol used by the official `bob` CLI:
 
 - API-key shape selects the upstream host and authentication scheme.
 - HMAC-SHA256 request signing is applied to the modern production host.
@@ -36,6 +36,7 @@ backend "bob" {
   # Required when the resolved key targets the modern (authn) backend -
   # i.e. anything other than an sk-/pk- legacy key. Wrap in env().
   hmac_secret = env("BOB_HMAC_SECRET")
+  user_agent  = "bobshell/${env("BOB_VERSION")}"
 
   # Routing allow-list. Clients address models as "<prefix>/<id>" where
   # <prefix> is the block label ("bob" here) and <id> is one of these.
@@ -79,14 +80,11 @@ Output (JSON form):
 Set the secret in your environment (e.g. via `eval $(... --env)` or a
 secrets manager) and reference it from HCL via `env("BOB_HMAC_SECRET")`.
 
-The algorithm is a faithful port of `scripts/extract_secrets.py` from the
-[litellm-ibm-bob][litellm-ibm-bob] reference project. Re-run the subcommand
-whenever you upgrade your local `bob` install; if the version printed by the
-extractor changes, the secret may have changed too.
+Re-run the subcommand whenever you upgrade your local `bob` install; if
+the version printed by the extractor changes, the secret may have changed
+too.
 
 If you only use a legacy `sk-`/`pk-` key the proxy does not need this secret.
-
-[litellm-ibm-bob]: https://github.com/TheLonelyGhost/litellm-ibm-bob
 
 ## Optional configuration
 
@@ -105,9 +103,9 @@ backend "bob" {
   # instance_id = "00000000-0000-0000-0000-000000000000"
   # team_id     = "00000000-0000-0000-0000-000000000000"
 
-  # User-Agent sent to Bob. Defaults to "bobshell/0.0.0"; some upstream
+  # User-Agent sent to Bob. Defaults to "bobshell/1.0.4"; some upstream
   # paths gate behaviour on the major version.
-  # user_agent = "bobshell/0.7.0"
+  # user_agent = "bobshell/1.10.0"
 
   request_timeout = "300s"
   max_retries     = 6

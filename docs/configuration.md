@@ -105,7 +105,8 @@ A prefix with no matching backend produces a 404.
 
 ## Provider documentation
 
-- [`providers/github-copilot.md`](providers/github-copilot.md)
-- [`providers/ibm-bob.md`](providers/ibm-bob.md)
+- [GitHub Copilot](providers/github-copilot.md)
+- [IBM Bob](providers/ibm-bob.md)
+- [OpenAI](providers/openai.md)
 
 [hcl]: https://github.com/hashicorp/hcl
