@@ -15,6 +15,7 @@ import (
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/copilot"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/ibmbob"
+	"github.com/thelonelyghost/llm-proxy/internal/providers/openai"
 	"github.com/thelonelyghost/llm-proxy/internal/server"
 )
 
@@ -93,6 +94,8 @@ func buildBackend(b config.BackendBlock) (backend.Backend, error) {
 		return copilot.New(b, copilot.Options{Name: b.Name, Models: b.Models})
 	case ibmbob.Type:
 		return ibmbob.New(b, ibmbob.Options{Name: b.Name, Models: b.Models})
+	case openai.Type:
+		return openai.New(b, openai.Options{Name: b.Name, Models: b.Models})
 	default:
 		return nil, fmt.Errorf("backend %q: unknown type %q", b.Name, b.Type)
 	}

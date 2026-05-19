@@ -1,0 +1,159 @@
+// Package openai implements the OpenAI-compatible backend provider.
+//
+// This provider supports any OpenAI-compatible API endpoint, including
+// the official OpenAI API as well as third-party implementations that
+// expose the same interface. Configuration requires either an api_key
+// (for authenticated endpoints like OpenAI) or a custom base_url (for
+// endpoints that may not require authentication).
+package openai
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/thelonelyghost/llm-proxy/internal/backend"
+	"github.com/thelonelyghost/llm-proxy/internal/config"
+)
+
+// Type is the HCL `type` value selecting this provider.
+const Type = "openai"
+
+// Default configuration values.
+const (
+	DefaultBaseURL        = "https://api.openai.com/v1"
+	DefaultRequestTimeout = 60 * time.Second
+)
+
+// Settings is the HCL-decodable provider configuration.
+type Settings struct {
+	BaseURL        string `hcl:"base_url,optional"`
+	APIKey         string `hcl:"api_key,optional"`
+	RequestTimeout string `hcl:"request_timeout,optional"`
+}
+
+func (s *Settings) applyDefaults() {
+	if s.BaseURL == "" {
+		s.BaseURL = DefaultBaseURL
+	}
+}
+
+func (s *Settings) resolveTimeout() (time.Duration, error) {
+	if s.RequestTimeout == "" {
+		return DefaultRequestTimeout, nil
+	}
+	d, err := time.ParseDuration(s.RequestTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("parse request_timeout %q: %w", s.RequestTimeout, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("request_timeout must be positive, got %s", d)
+	}
+	return d, nil
+}
+
+// Provider is the backend.Backend implementation for OpenAI-compatible APIs.
+type Provider struct {
+	name     string
+	settings Settings
+	models   []string
+	client   *http.Client
+}
+
+// Options carries non-HCL inputs.
+type Options struct {
+	Name       string
+	Models     []string
+	HTTPClient *http.Client
+}
+
+// New constructs a Provider.
+func New(block config.BackendBlock, opts Options) (*Provider, error) {
+	if block.Type != Type {
+		return nil, fmt.Errorf("openai.New: block type %q != %q", block.Type, Type)
+	}
+	var s Settings
+	if err := config.DecodeBackend(block, &s); err != nil {
+		return nil, err
+	}
+	s.applyDefaults()
+
+	if s.APIKey == "" && s.BaseURL == DefaultBaseURL {
+		return nil, fmt.Errorf("openai backend %q: api_key is required unless base_url is specified", block.Name)
+	}
+
+	timeout, err := s.resolveTimeout()
+	if err != nil {
+		return nil, err
+	}
+
+	client := opts.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
+
+	name := opts.Name
+	if name == "" {
+		name = block.Name
+	}
+	models := opts.Models
+	if len(models) == 0 {
+		models = block.Models
+	}
+
+	return &Provider{
+		name:     name,
+		settings: s,
+		models:   models,
+		client:   client,
+	}, nil
+}
+
+// Name returns the routing prefix.
+func (p *Provider) Name() string { return p.name }
+
+// Models returns the configured allow-list.
+func (p *Provider) Models(_ context.Context) ([]backend.Model, error) {
+	out := make([]backend.Model, 0, len(p.models))
+	for _, m := range p.models {
+		out = append(out, backend.Model{ID: m, OwnedBy: p.name})
+	}
+	return out, nil
+}
+
+func (p *Provider) allowed(model string) error {
+	if len(p.models) == 0 {
+		return nil
+	}
+	for _, m := range p.models {
+		if m == model {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %q not in backend %q allow-list", backend.ErrUnknownModel, model, p.name)
+}
+
+// Chat forwards a chat-completions request to the OpenAI-compatible API.
+func (p *Provider) Chat(ctx context.Context, req backend.ChatRequest) (*backend.Response, error) {
+	if err := p.allowed(req.Model); err != nil {
+		return nil, err
+	}
+	return p.forward(ctx, http.MethodPost, "/chat/completions", req.Body, req.Stream)
+}
+
+// Complete forwards a legacy completions request.
+func (p *Provider) Complete(ctx context.Context, req backend.CompletionRequest) (*backend.Response, error) {
+	if err := p.allowed(req.Model); err != nil {
+		return nil, err
+	}
+	return p.forward(ctx, http.MethodPost, "/completions", req.Body, req.Stream)
+}
+
+// Embed forwards an embeddings request.
+func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*backend.Response, error) {
+	if err := p.allowed(req.Model); err != nil {
+		return nil, err
+	}
+	return p.forward(ctx, http.MethodPost, "/embeddings", req.Body, false)
+}

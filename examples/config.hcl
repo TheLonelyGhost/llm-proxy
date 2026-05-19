@@ -52,3 +52,26 @@ backend "bob" {
   max_retries     = 6
   retry_delay     = "1s"
 }
+
+# OpenAI-compatible backend. Works with OpenAI, Azure OpenAI, OpenRouter,
+# local inference servers, and any other service implementing the OpenAI API.
+backend "ollama" {
+  type = "openai"
+
+  # Required for official OpenAI API; optional for custom endpoints
+  # api_key = env("OPENAI_API_KEY")
+
+  # Optional: use a custom endpoint (defaults to https://api.openai.com/v1)
+  # base_url = "http://localhost:8000/v1"  # for local servers
+  # base_url = "https://openrouter.ai/api/v1"  # for OpenRouter
+  base_url = "http://127.0.0.1:11434/v1"
+
+  models = [
+    "gpt-4",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo",
+  ]
+
+  # Optional: adjust timeout for longer-running requests
+  # request_timeout = "120s"
+}
