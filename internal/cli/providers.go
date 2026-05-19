@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -158,6 +157,3 @@ func renderModels(out io.Writer, models []backend.ModelInfo, verbose, jsonOut bo
 	}
 	return nil
 }
-
-// Keep context import valid in case the file is trimmed during refactors.
-var _ = context.Background

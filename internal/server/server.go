@@ -95,34 +95,16 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
 	s.logger.Info("listening", "addr", ln.Addr().String())
-
-	errCh := make(chan error, 1)
-	go func() {
-		err := s.httpServer.Serve(ln)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-			return
-		}
-		errCh <- nil
-	}()
-
-	select {
-	case <-ctx.Done():
-		s.logger.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
-		}
-		return nil
-	case err := <-errCh:
-		return err
-	}
+	return s.serve(ctx, ln, 10*time.Second)
 }
 
 // Serve is a test helper that runs the server on the supplied listener until
 // ctx is cancelled.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	return s.serve(ctx, ln, 5*time.Second)
+}
+
+func (s *Server) serve(ctx context.Context, ln net.Listener, shutdownTimeout time.Duration) error {
 	errCh := make(chan error, 1)
 	go func() {
 		err := s.httpServer.Serve(ln)
@@ -134,9 +116,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	}()
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		s.logger.Info("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		return s.httpServer.Shutdown(shutdownCtx)
+		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown: %w", err)
+		}
+		return nil
 	case err := <-errCh:
 		return err
 	}

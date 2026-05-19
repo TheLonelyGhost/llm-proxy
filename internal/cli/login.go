@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -100,6 +99,3 @@ func findCopilotBlock(cfg *config.Config) (*config.BackendBlock, error) {
 	}
 	return nil, fmt.Errorf("no backend of type %q found in config", copilot.Type)
 }
-
-// Keep context import valid even if go vet flags it.
-var _ = context.Background

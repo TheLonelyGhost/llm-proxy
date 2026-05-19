@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,28 +111,28 @@ func (s *Server) lookupBackend(w http.ResponseWriter, name string) (backend.Back
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.readBody(w, r)
-	if !ok {
-		return
-	}
-	route, stream, rewritten, err := extractAndRewriteModel(body)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	b, ok := s.lookupBackend(w, route.Backend)
-	if !ok {
-		return
-	}
-	resp, err := b.Chat(r.Context(), backend.ChatRequest{
-		Model:  route.Model,
-		Stream: stream,
-		Body:   rewritten,
+	s.handleModelRequest(w, r, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+		return b.Chat(ctx, backend.ChatRequest{Model: route.Model, Stream: stream, Body: body})
 	})
-	s.writeUpstreamResponse(w, resp, err, stream)
 }
 
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
+	s.handleModelRequest(w, r, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+		return b.Complete(ctx, backend.CompletionRequest{Model: route.Model, Stream: stream, Body: body})
+	})
+}
+
+func (s *Server) handleEmbedding(w http.ResponseWriter, r *http.Request) {
+	s.handleModelRequest(w, r, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, _ bool) (*backend.Response, error) {
+		return b.Embed(ctx, backend.EmbeddingRequest{Model: route.Model, Body: body})
+	})
+}
+
+func (s *Server) handleModelRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	op func(context.Context, backend.Backend, router.Route, []byte, bool) (*backend.Response, error),
+) {
 	body, ok := s.readBody(w, r)
 	if !ok {
 		return
@@ -145,33 +146,8 @@ func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	resp, err := b.Complete(r.Context(), backend.CompletionRequest{
-		Model:  route.Model,
-		Stream: stream,
-		Body:   rewritten,
-	})
+	resp, err := op(r.Context(), b, route, rewritten, stream)
 	s.writeUpstreamResponse(w, resp, err, stream)
-}
-
-func (s *Server) handleEmbedding(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.readBody(w, r)
-	if !ok {
-		return
-	}
-	route, _, rewritten, err := extractAndRewriteModel(body)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	b, ok := s.lookupBackend(w, route.Backend)
-	if !ok {
-		return
-	}
-	resp, err := b.Embed(r.Context(), backend.EmbeddingRequest{
-		Model: route.Model,
-		Body:  rewritten,
-	})
-	s.writeUpstreamResponse(w, resp, err, false)
 }
 
 // writeUpstreamResponse maps a backend.Response (or error) onto the client's

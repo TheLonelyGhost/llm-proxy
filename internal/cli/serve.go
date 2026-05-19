@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -108,6 +107,3 @@ func newLogger(w io.Writer, level string) *slog.Logger {
 	}
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl}))
 }
-
-// Ensure context import is used even if go-vet flags it.
-var _ = context.Background
