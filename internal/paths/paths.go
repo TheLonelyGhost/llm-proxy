@@ -9,11 +9,30 @@ package paths
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 )
 
 // AppName is the directory name used under both config and cache roots.
 const AppName = "llm-proxy"
+
+// ConfigFile returns the persistent configuration file for the proxy.
+//
+// On Linux this is typically ~/.config/llm-proxy/config.hcl, on macOS
+// ~/Library/Application Support/llm-proxy/config.hcl, and on Windows
+// %AppData%\llm-proxy\config.hcl. The parent directory is created (mode
+// 0700) if missing.
+func ConfigFile() (string, error) {
+	if dir, ok := os.LookupEnv("LLM_PROXY_CONFIG"); ok {
+		return dir, nil
+	}
+	dir, err := ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.hcl"), nil
+}
 
 // ConfigDir returns the persistent configuration directory for the proxy.
 //
@@ -21,14 +40,20 @@ const AppName = "llm-proxy"
 // ~/Library/Application Support/llm-proxy, and on Windows
 // %AppData%\llm-proxy. The directory is created (mode 0700) if missing.
 func ConfigDir() (string, error) {
-	dir, ok := os.LookupEnv("LLM_PROXY_CONFIG_DIR")
-	if !ok {
-		base, err := os.UserConfigDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve user config dir: %w", err)
+	if dir, ok := os.LookupEnv("LLM_PROXY_CONFIG_DIR"); ok {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("create config dir %q: %w", dir, err)
 		}
-		dir = filepath.Join(base, AppName)
+		return dir, nil
 	}
+	if u, _ := user.Current(); runtime.GOOS != "windows" && u != nil && u.Uid == "0" {
+		return "/etc/" + AppName, nil
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config dir: %w", err)
+	}
+	dir := filepath.Join(base, AppName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create config dir %q: %w", dir, err)
 	}
@@ -38,14 +63,17 @@ func ConfigDir() (string, error) {
 // CacheDir returns the cache directory used for short-lived state such as
 // exchanged provider tokens. The directory is created (mode 0700) if missing.
 func CacheDir() (string, error) {
-	dir, ok := os.LookupEnv("LLM_PROXY_CACHE_DIR")
-	if !ok {
-		base, err := os.UserCacheDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve user cache dir: %w", err)
+	if dir, ok := os.LookupEnv("LLM_PROXY_CACHE_DIR"); ok {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("create cache dir %q: %w", dir, err)
 		}
-		dir = filepath.Join(base, AppName)
+		return dir, nil
 	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	dir := filepath.Join(base, AppName)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create cache dir %q: %w", dir, err)
 	}
