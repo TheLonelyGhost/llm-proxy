@@ -105,10 +105,15 @@ backend's own credentials. Request bodies are capped at 8 MiB.
 Every request must include a `model` field of the form
 `"<backend-prefix>/<provider-model-id>"`. Examples:
 
-| Client sends          | Routed to        | Forwarded model |
-| --------------------- | ---------------- | --------------- |
-| `copilot/gpt-4o`      | `copilot`        | `gpt-4o`        |
-| `copilot/claude-3.5`  | `copilot`        | `claude-3.5`    |
+| Client sends                 | Routed to        | Forwarded model       |
+| ---------------------------- | ---------------- | --------------------- |
+| `copilot/gpt-4o`             | `copilot`        | `gpt-4o`              |
+| `copilot/claude-3.5`         | `copilot`        | `claude-3.5`          |
+| `openai/openai/gpt-oss-120b` | `openai`         | `openai/gpt-oss-120b` |
+
+Only the first `/` is significant: characters before it select the backend,
+and everything after it (including any further `/` characters) is forwarded
+verbatim as the upstream model id.
 
 There is **no** default backend. A model id missing a prefix produces a 400.
 A prefix with no matching backend produces a 404.

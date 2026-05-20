@@ -14,6 +14,9 @@ func TestParse_Valid(t *testing.T) {
 		"  copilot/gpt-4o   ": {Backend: "copilot", Model: "gpt-4o"},
 		"a/b":                 {Backend: "a", Model: "b"},
 		"copilot/model-with.dots-and_underscores": {Backend: "copilot", Model: "model-with.dots-and_underscores"},
+		"copilot/gpt/4o":         {Backend: "copilot", Model: "gpt/4o"},
+		"copilot/org/team/model": {Backend: "copilot", Model: "org/team/model"},
+		"copilot//gpt-4o":        {Backend: "copilot", Model: "/gpt-4o"},
 	}
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {
@@ -35,8 +38,6 @@ func TestParse_Invalid(t *testing.T) {
 		"copilot",
 		"/gpt-4o",
 		"copilot/",
-		"copilot//gpt-4o",
-		"copilot/gpt/4o",
 		"  /gpt",
 		"copilot/ gpt-4o",
 		"copilot /gpt-4o",
@@ -69,8 +70,8 @@ func FuzzParseModel(f *testing.F) {
 		if r.Backend == "" || r.Model == "" {
 			t.Fatalf("empty half in %+v from %q", r, s)
 		}
-		if strings.ContainsRune(r.Backend, '/') || strings.ContainsRune(r.Model, '/') {
-			t.Fatalf("slash leaked into %+v from %q", r, s)
+		if strings.ContainsRune(r.Backend, '/') {
+			t.Fatalf("slash leaked into backend %+v from %q", r, s)
 		}
 		if r.Backend != strings.ToLower(r.Backend) {
 			t.Fatalf("backend not lowercased: %q", r.Backend)

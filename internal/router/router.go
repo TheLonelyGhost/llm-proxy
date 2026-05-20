@@ -27,9 +27,10 @@ type Route struct {
 // Parse splits a client-supplied model id into its backend prefix and the
 // canonical model name expected by that backend.
 //
-// Both halves must be non-empty after trimming surrounding whitespace and
-// must not themselves contain '/'. The backend half is lowercased to match
-// registry keys.
+// The split is made at the first '/' only; any subsequent '/' characters are
+// preserved as part of the model name and forwarded to the upstream backend
+// verbatim. Both halves must be non-empty after trimming surrounding
+// whitespace. The backend half is lowercased to match registry keys.
 func Parse(id string) (Route, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -41,9 +42,6 @@ func Parse(id string) (Route, error) {
 	}
 	left := id[:idx]
 	right := id[idx+1:]
-	if strings.ContainsRune(right, '/') {
-		return Route{}, ErrInvalidModelID
-	}
 	if strings.TrimSpace(left) != left || strings.TrimSpace(right) != right {
 		return Route{}, ErrInvalidModelID
 	}
