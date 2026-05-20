@@ -3,10 +3,12 @@
 // Endpoints:
 //
 //	GET  /healthz                   -> 200 OK liveness probe
-//	GET  /v1/models                 -> aggregated, prefix-qualified model list
+//	GET  /v1/models                 -> aggregated, prefix-qualified model list (OpenAI spec)
+//	GET  /v1/model/info             -> model info with capabilities, token limits, reasoning effort levels
 //	POST /v1/chat/completions       -> routed to backend (streaming preserved)
 //	POST /v1/completions            -> legacy completions
 //	POST /v1/embeddings             -> embeddings
+//	POST /v1/responses              -> unified response objects with reasoning effort support
 //
 // The proxy strips the client's Authorization header before forwarding (the
 // upstream uses the backend's own credentials), and rewrites the request
@@ -71,9 +73,11 @@ func New(opts Options) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
+	mux.HandleFunc("GET /v1/model/info", s.handleModelInfo)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
 	mux.HandleFunc("POST /v1/completions", s.handleCompletion)
 	mux.HandleFunc("POST /v1/embeddings", s.handleEmbedding)
+	mux.HandleFunc("POST /v1/responses", s.handleResponses)
 
 	s.httpServer = &http.Server{
 		Addr:              addr,

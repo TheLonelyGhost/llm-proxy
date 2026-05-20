@@ -93,12 +93,53 @@ The proxy exposes:
 | ------ | -------------------------- | ------------------------------------------ |
 | GET    | `/healthz`                 | Liveness; returns registered backend names |
 | GET    | `/v1/models`               | Aggregated, prefix-qualified model list    |
+| GET    | `/v1/model/info`           | Model capabilities and token limits        |
 | POST   | `/v1/chat/completions`     | OpenAI chat completions (SSE supported)    |
 | POST   | `/v1/completions`          | Legacy text completions                    |
 | POST   | `/v1/embeddings`           | Embeddings                                 |
+| POST   | `/v1/responses`            | Unified response objects with reasoning    |
 
 The client's `Authorization` header is ignored entirely; the proxy injects the
 backend's own credentials. Request bodies are capped at 8 MiB.
+
+### Model capability discovery
+
+- `/v1/models` returns exact OpenAI spec format with no additional fields
+- `/v1/model/info` is a proxy extension that returns per-model capabilities,
+  token limits, reasoning effort levels, and vendor metadata
+- Use `/v1/model/info` to discover which features each model supports before
+  making requests
+
+**Capability field values:**
+
+| Capability   | Meaning                                                              |
+| ------------ | -------------------------------------------------------------------- |
+| `chat`       | Model supports `/v1/chat/completions` endpoint                       |
+| `completion` | Model supports `/v1/completions` endpoint (legacy text completion)   |
+| `embedding`  | Model supports `/v1/embeddings` endpoint                             |
+| `tools`      | Model supports function calling / tool use                           |
+| `vision`     | Model can process image inputs                                       |
+| `reasoning`  | Model supports reasoning capabilities via `/v1/responses` endpoint   |
+| `streaming`  | Model supports Server-Sent Events (SSE) streaming responses          |
+
+**Token limits:**
+
+The `token_limits` object contains:
+- `max_input_tokens`: Maximum tokens allowed in input (prompt)
+- `max_output_tokens`: Maximum tokens model will generate in response
+- `max_context_tokens`: Total context window size (input + output)
+
+**Reasoning effort levels:**
+
+For models with the `reasoning` capability, `reasoning_effort_levels` lists
+supported effort values for the `/v1/responses` endpoint:
+- `low`: Faster response with less reasoning depth
+- `medium`: Balanced response time and reasoning quality
+- `high`: Slower response with deeper reasoning
+
+Note: Capabilities vary by backend. For example, `copilot/gpt-4o` may have
+different capabilities than `openai/gpt-4o` even though they serve the same
+base model.
 
 ## Routing
 

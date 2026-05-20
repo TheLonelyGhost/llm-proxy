@@ -28,6 +28,9 @@ func resolveConfigPath(cmd *cobra.Command, flagValue string) string {
 	if envPath := os.Getenv(configEnvVar); envPath != "" {
 		return envPath
 	}
+	if flagValue != "" {
+		return flagValue
+	}
 	return defaultConfigPath()
 }
 

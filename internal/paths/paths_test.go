@@ -36,6 +36,38 @@ func TestConfigAndCacheDir(t *testing.T) {
 	}
 }
 
+func TestConfigDir_DarwinPrefersLegacyPath(t *testing.T) {
+	tmp := t.TempDir()
+	legacy := filepath.Join(tmp, ".config", AppName)
+	if err := os.MkdirAll(legacy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	if got, err := configDirForGOOS("darwin"); err != nil {
+		t.Fatalf("configDirForGOOS: %v", err)
+	} else if got != legacy {
+		t.Fatalf("got %q, want %q", got, legacy)
+	}
+}
+
+func TestConfigDir_DarwinFallsBackToApplePath(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	got, err := configDirForGOOS("darwin")
+	if err != nil {
+		t.Fatalf("configDirForGOOS: %v", err)
+	}
+	want := filepath.Join(tmp, "Library", "Application Support", AppName)
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if st, err := os.Stat(got); err != nil || !st.IsDir() {
+		t.Fatalf("apple config dir not created: %v", err)
+	}
+}
+
 func TestWriteSecret(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "sub", "secret.json")

@@ -21,9 +21,11 @@ import (
 
 // Config is the top-level configuration document.
 type Config struct {
-	Server   *ServerBlock   `hcl:"server,block"`
-	Backends []BackendBlock `hcl:"backend,block"`
-	Remain   hcl.Body       `hcl:",remain"`
+	Server      *ServerBlock   `hcl:"server,block"`
+	Backends    []BackendBlock `hcl:"backend,block"`
+	Remain      hcl.Body       `hcl:",remain"`
+	SourcePath  string         // Set by Load() for debugging/logging
+	SourceFiles []string       // Set by Load() for debugging/logging
 }
 
 // ServerBlock configures the HTTP listener.
@@ -158,6 +160,10 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+
+	cfg.SourcePath = path
+	cfg.SourceFiles = files
+
 	return cfg, nil
 }
 

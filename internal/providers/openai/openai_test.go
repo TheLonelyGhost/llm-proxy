@@ -333,3 +333,72 @@ func TestProvider_ListUpstreamModels_SortsAndIgnoresMissingIDs(t *testing.T) {
 		t.Fatalf("sorted ids = %v", got)
 	}
 }
+
+func TestProvider_ListUpstreamModels_ReasoningEffortLevels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"object": "list",
+			"data": []map[string]any{
+				{"id": "gpt-4o", "object": "model"},
+				{"id": "o1-preview", "object": "model"},
+				{"id": "o1-mini", "object": "model"},
+				{"id": "o3-mini", "object": "model"},
+				{"id": "gpt-3.5-turbo", "object": "model"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	block := buildBlock(t, fmt.Sprintf(`base_url = %q`, srv.URL))
+	p, err := openai.New(block, openai.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	models, err := p.ListUpstreamModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListUpstreamModels: %v", err)
+	}
+
+	reasoningModels := map[string]bool{
+		"o1-preview": false,
+		"o1-mini":    false,
+		"o3-mini":    false,
+	}
+	nonReasoningModels := map[string]bool{
+		"gpt-4o":        false,
+		"gpt-3.5-turbo": false,
+	}
+
+	for _, m := range models {
+		if _, ok := reasoningModels[m.ID]; ok {
+			reasoningModels[m.ID] = true
+			if len(m.ReasoningEffortLevels) != 3 {
+				t.Errorf("model %s: expected 3 reasoning effort levels, got %d", m.ID, len(m.ReasoningEffortLevels))
+			}
+			expected := []string{"low", "medium", "high"}
+			for i, level := range expected {
+				if i >= len(m.ReasoningEffortLevels) || m.ReasoningEffortLevels[i] != level {
+					t.Errorf("model %s: expected reasoning effort level %d to be %s", m.ID, i, level)
+				}
+			}
+		}
+		if _, ok := nonReasoningModels[m.ID]; ok {
+			nonReasoningModels[m.ID] = true
+			if len(m.ReasoningEffortLevels) != 0 {
+				t.Errorf("model %s: expected no reasoning effort levels, got %v", m.ID, m.ReasoningEffortLevels)
+			}
+		}
+	}
+
+	for model, found := range reasoningModels {
+		if !found {
+			t.Errorf("reasoning model %s not found in results", model)
+		}
+	}
+	for model, found := range nonReasoningModels {
+		if !found {
+			t.Errorf("non-reasoning model %s not found in results", model)
+		}
+	}
+}

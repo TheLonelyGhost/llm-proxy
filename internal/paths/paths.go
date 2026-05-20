@@ -46,8 +46,18 @@ func ConfigDir() (string, error) {
 		}
 		return dir, nil
 	}
-	if u, _ := user.Current(); runtime.GOOS != "windows" && u != nil && u.Uid == "0" {
+	return configDirForGOOS(runtime.GOOS)
+}
+
+func configDirForGOOS(goos string) (string, error) {
+	if u, _ := user.Current(); goos != "windows" && u != nil && u.Uid == "0" {
 		return "/etc/" + AppName, nil
+	}
+	if goos == "darwin" {
+		legacy := filepath.Join(os.Getenv("HOME"), ".config", AppName)
+		if st, err := os.Stat(legacy); err == nil && st.IsDir() {
+			return legacy, nil
+		}
 	}
 	base, err := os.UserConfigDir()
 	if err != nil {

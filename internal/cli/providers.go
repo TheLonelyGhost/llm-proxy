@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/paths"
 )
 
 // newProvidersCmd returns the `providers` command group: read-only helpers
@@ -69,6 +70,7 @@ func newProvidersListModelsCmd(out io.Writer) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("init backend %q: %w", block.Name, err)
 			}
+			//nolint:staticcheck // SA1019: ModelLister is deprecated but still supported for backward compatibility
 			lister, ok := b.(backend.ModelLister)
 			if !ok {
 				return fmt.Errorf("backend %q (type %q) does not support upstream model listing",
@@ -83,7 +85,14 @@ func newProvidersListModelsCmd(out io.Writer) *cobra.Command {
 			return renderModels(out, models, verbose, jsonOut)
 		},
 	}
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", defaultConfigPath(), "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
+	// default to platform config path if available
+	var cfgDefault string
+	if p, err := paths.ConfigFile(); err == nil {
+		cfgDefault = p
+	} else {
+		cfgDefault = defaultConfigPath()
+	}
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", cfgDefault, "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false,
 		"print supplemental metadata for each model")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,

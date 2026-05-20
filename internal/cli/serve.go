@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/paths"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/copilot"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/ibmbob"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/openai"
@@ -28,10 +29,18 @@ func newServeCmd(out io.Writer) *cobra.Command {
 		Use:   "serve",
 		Short: "Start the proxy HTTP server",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			logger := newLogger(out, logLevel)
+
 			cfg, err := loadConfig(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
+
+			logger.Debug("loaded configuration",
+				"source", cfg.SourcePath,
+				"files", cfg.SourceFiles,
+			)
+
 			// CLI flags override file settings when explicitly set.
 			if cmd.Flags().Changed("address") {
 				cfg.Server.Address = address
@@ -40,7 +49,6 @@ func newServeCmd(out io.Writer) *cobra.Command {
 				cfg.Server.Port = port
 			}
 
-			logger := newLogger(out, logLevel)
 			reg := backend.NewRegistry()
 			if err := registerBackends(cfg, reg); err != nil {
 				return err
@@ -62,7 +70,14 @@ func newServeCmd(out io.Writer) *cobra.Command {
 			return srv.Run(ctx)
 		},
 	}
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", defaultConfigPath(), "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
+	// default to platform config path if available
+	var cfgDefault string
+	if p, err := paths.ConfigFile(); err == nil {
+		cfgDefault = p
+	} else {
+		cfgDefault = defaultConfigPath()
+	}
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", cfgDefault, "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
 	cmd.Flags().StringVar(&address, "address", config.DefaultAddress, "interface address to bind")
 	cmd.Flags().IntVar(&port, "port", config.DefaultPort, "TCP port to bind")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")

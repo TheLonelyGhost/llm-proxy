@@ -25,12 +25,25 @@ var ErrUnsupported = errors.New("capability not supported by backend")
 var ErrUnknownModel = errors.New("unknown model")
 
 // Model describes a single model exposed by a backend.
+//
+// Deprecated: Use ModelInfo instead. Will be removed in a future version.
 type Model struct {
 	// ID is the canonical model identifier as the backend expects it
 	// (i.e. without any routing prefix).
 	ID string `json:"id"`
 	// OwnedBy is a free-form string included in OpenAI's /v1/models output.
 	OwnedBy string `json:"owned_by"`
+}
+
+// TokenLimits describes the token capacity constraints for a model.
+// All fields are optional; a zero value indicates the limit is unknown.
+type TokenLimits struct {
+	// MaxInputTokens is the maximum number of tokens accepted in the input.
+	MaxInputTokens int `json:"max_input_tokens,omitempty"`
+	// MaxOutputTokens is the maximum number of tokens the model will generate.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	// MaxContextTokens is the total context window size (input + output).
+	MaxContextTokens int `json:"max_context_tokens,omitempty"`
 }
 
 // ModelInfo describes a single upstream model with supplemental metadata as
@@ -55,6 +68,13 @@ type ModelInfo struct {
 	// Capabilities lists feature tags reported by the upstream (e.g.
 	// "chat", "embeddings", "tool_calls"). Order is upstream-defined.
 	Capabilities []string `json:"capabilities,omitempty"`
+	// ReasoningEffortLevels lists supported reasoning effort levels for
+	// models with reasoning capability (e.g. ["low", "medium", "high"]).
+	// Only populated for models that include "reasoning" in Capabilities.
+	ReasoningEffortLevels []string `json:"reasoning_effort_levels,omitempty"`
+	// TokenLimits describes the model's token capacity constraints.
+	// Nil if limits are unknown or not reported by the upstream.
+	TokenLimits *TokenLimits `json:"token_limits,omitempty"`
 	// Deprecated is true when the upstream marks the model as
 	// deprecated or sunset.
 	Deprecated bool `json:"deprecated,omitempty"`
@@ -67,6 +87,9 @@ type ModelInfo struct {
 // models the configured credentials are entitled to use, with supplemental
 // metadata. Backends that cannot (or do not) talk to an upstream catalogue
 // should simply not implement it.
+//
+// Deprecated: Backends should now implement Models() to return []ModelInfo directly.
+// This interface exists for backward compatibility and will be removed in a future version.
 //
 // Implementations must filter out models that the upstream has explicitly
 // disabled (for example via policy) so the returned slice represents only
@@ -98,6 +121,21 @@ type EmbeddingRequest struct {
 	Body  []byte
 }
 
+// Reasoning holds optional reasoning parameters for /v1/responses requests.
+type Reasoning struct {
+	// Effort specifies the reasoning effort level: "low", "medium", or "high".
+	Effort string
+}
+
+// ResponsesRequest is the decoded /v1/responses request.
+type ResponsesRequest struct {
+	Model     string
+	Stream    bool
+	Input     string
+	Reasoning *Reasoning // Optional reasoning parameters
+	Body      []byte
+}
+
 // Response is what a backend hands back to the server. Headers are copied to
 // the downstream HTTP response and Body is streamed verbatim, so SSE works
 // naturally for streaming requests.
@@ -117,8 +155,9 @@ type Backend interface {
 	Name() string
 
 	// Models lists the models this backend will accept. The proxy
-	// aggregates results across backends to serve /v1/models.
-	Models(ctx context.Context) ([]Model, error)
+	// aggregates results across backends to serve /v1/models and /v1/model/info.
+	// Returns ModelInfo with full metadata including capabilities and token limits.
+	Models(ctx context.Context) ([]ModelInfo, error)
 
 	// Chat handles a chat-completion request. Streaming requests are
 	// indicated by ChatRequest.Stream; the returned Body should be
@@ -130,4 +169,8 @@ type Backend interface {
 
 	// Embed handles an embedding request. May return ErrUnsupported.
 	Embed(ctx context.Context, req EmbeddingRequest) (*Response, error)
+
+	// Responses handles a unified response request with optional reasoning.
+	// May return ErrUnsupported if the backend does not support reasoning models.
+	Responses(ctx context.Context, req ResponsesRequest) (*Response, error)
 }

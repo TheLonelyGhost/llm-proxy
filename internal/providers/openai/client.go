@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 )
@@ -26,9 +27,9 @@ type rawModelEntry struct {
 
 // forward dispatches an upstream HTTP request to the OpenAI-compatible API.
 // The returned Response.Body is owned by the caller and must be closed.
-func (p *Provider) forward(ctx context.Context, method, path string, body []byte, _ bool) (*backend.Response, error) {
+func (p *Provider) forward(ctx context.Context, path string, body []byte, _ bool) (*backend.Response, error) {
 	url := p.settings.BaseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -112,8 +113,22 @@ func (p *Provider) ListUpstreamModels(ctx context.Context) ([]backend.ModelInfo,
 		if len(extras) == 0 {
 			extras = nil
 		}
-		out = append(out, backend.ModelInfo{ID: m.ID, Vendor: "OpenAI", Extras: extras})
+
+		modelInfo := backend.ModelInfo{ID: m.ID, Vendor: "OpenAI", Extras: extras}
+
+		if isReasoningModel(m.ID) {
+			modelInfo.ReasoningEffortLevels = []string{"low", "medium", "high"}
+		}
+
+		out = append(out, modelInfo)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+func isReasoningModel(modelID string) bool {
+	return strings.HasPrefix(modelID, "o1-") ||
+		strings.HasPrefix(modelID, "o3-") ||
+		modelID == "o1" ||
+		modelID == "o3"
 }

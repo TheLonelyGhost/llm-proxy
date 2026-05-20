@@ -117,11 +117,35 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 // Name returns the routing prefix.
 func (p *Provider) Name() string { return p.name }
 
-// Models returns the configured allow-list.
-func (p *Provider) Models(_ context.Context) ([]backend.Model, error) {
-	out := make([]backend.Model, 0, len(p.models))
+// Models returns the configured allow-list with full metadata.
+func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
+	// If no models configured, return empty list (allow-list mode)
+	if len(p.models) == 0 {
+		return nil, nil
+	}
+
+	// Get full model metadata from upstream
+	allModels, err := p.ListUpstreamModels(ctx)
+	if err != nil {
+		// Fallback to minimal ModelInfo if upstream query fails
+		out := make([]backend.ModelInfo, 0, len(p.models))
+		for _, m := range p.models {
+			out = append(out, backend.ModelInfo{ID: m, Vendor: p.name})
+		}
+		return out, nil
+	}
+
+	// Filter to configured allow-list
+	modelSet := make(map[string]bool, len(p.models))
 	for _, m := range p.models {
-		out = append(out, backend.Model{ID: m, OwnedBy: p.name})
+		modelSet[m] = true
+	}
+
+	out := make([]backend.ModelInfo, 0, len(p.models))
+	for _, info := range allModels {
+		if modelSet[info.ID] {
+			out = append(out, info)
+		}
 	}
 	return out, nil
 }
@@ -143,7 +167,7 @@ func (p *Provider) Chat(ctx context.Context, req backend.ChatRequest) (*backend.
 	if err := p.allowed(req.Model); err != nil {
 		return nil, err
 	}
-	return p.forward(ctx, http.MethodPost, "/v1/chat/completions", req.Body, req.Stream)
+	return p.forward(ctx, "/v1/chat/completions", req.Body, req.Stream)
 }
 
 // Complete forwards a legacy completions request.
@@ -151,7 +175,7 @@ func (p *Provider) Complete(ctx context.Context, req backend.CompletionRequest) 
 	if err := p.allowed(req.Model); err != nil {
 		return nil, err
 	}
-	return p.forward(ctx, http.MethodPost, "/v1/completions", req.Body, req.Stream)
+	return p.forward(ctx, "/v1/completions", req.Body, req.Stream)
 }
 
 // Embed forwards an embeddings request.
@@ -159,5 +183,13 @@ func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*ba
 	if err := p.allowed(req.Model); err != nil {
 		return nil, err
 	}
-	return p.forward(ctx, http.MethodPost, "/v1/embeddings", req.Body, false)
+	return p.forward(ctx, "/v1/embeddings", req.Body, false)
+}
+
+// Responses forwards a unified response request with reasoning support.
+func (p *Provider) Responses(ctx context.Context, req backend.ResponsesRequest) (*backend.Response, error) {
+	if err := p.allowed(req.Model); err != nil {
+		return nil, err
+	}
+	return p.forward(ctx, "/v1/responses", req.Body, req.Stream)
 }

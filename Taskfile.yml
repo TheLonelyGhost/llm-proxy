@@ -34,6 +34,15 @@ tasks:
       - mkdir -p bin
       - go build -trimpath -ldflags="-s -w" -o bin/{{.BINARY}} ./cmd/{{.BINARY}}
 
+  install:
+    desc: "Install the binary to PATH"
+    deps:
+      - build
+    cmds:
+      - cmd: mkdir -p ~/.local/bin
+        silent: true
+      - cmd: install -m0755 bin/{{.BINARY}} ~/.local/bin/
+
   build:all:
     desc: "Cross-compile for supported platforms (linux/darwin/windows × amd64/arm64)"
     cmds:

@@ -11,8 +11,8 @@ import (
 type stubBackend struct{ name string }
 
 func (s stubBackend) Name() string { return s.name }
-func (s stubBackend) Models(context.Context) ([]backend.Model, error) {
-	return []backend.Model{{ID: "m", OwnedBy: s.name}}, nil
+func (s stubBackend) Models(context.Context) ([]backend.ModelInfo, error) {
+	return []backend.ModelInfo{{ID: "m", Vendor: s.name}}, nil
 }
 func (s stubBackend) Chat(context.Context, backend.ChatRequest) (*backend.Response, error) {
 	return nil, backend.ErrUnsupported
@@ -21,6 +21,9 @@ func (s stubBackend) Complete(context.Context, backend.CompletionRequest) (*back
 	return nil, backend.ErrUnsupported
 }
 func (s stubBackend) Embed(context.Context, backend.EmbeddingRequest) (*backend.Response, error) {
+	return nil, backend.ErrUnsupported
+}
+func (s stubBackend) Responses(context.Context, backend.ResponsesRequest) (*backend.Response, error) {
 	return nil, backend.ErrUnsupported
 }
 

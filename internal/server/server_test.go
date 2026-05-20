@@ -18,7 +18,7 @@ import (
 // fakeBackend implements backend.Backend with scripted responses.
 type fakeBackend struct {
 	name    string
-	models  []backend.Model
+	models  []backend.ModelInfo
 	respond func(method string, body []byte) (*backend.Response, error)
 
 	mu       sync.Mutex
@@ -26,15 +26,15 @@ type fakeBackend struct {
 }
 
 func newFakeBackend(name string, models []string) *fakeBackend {
-	ms := make([]backend.Model, 0, len(models))
+	ms := make([]backend.ModelInfo, 0, len(models))
 	for _, m := range models {
-		ms = append(ms, backend.Model{ID: m, OwnedBy: name})
+		ms = append(ms, backend.ModelInfo{ID: m, Vendor: name})
 	}
 	return &fakeBackend{name: name, models: ms, captured: make(map[string][]byte)}
 }
 
-func (f *fakeBackend) Name() string                                    { return f.name }
-func (f *fakeBackend) Models(context.Context) ([]backend.Model, error) { return f.models, nil }
+func (f *fakeBackend) Name() string                                        { return f.name }
+func (f *fakeBackend) Models(context.Context) ([]backend.ModelInfo, error) { return f.models, nil }
 
 func (f *fakeBackend) record(kind string, body []byte) {
 	f.mu.Lock()
@@ -58,6 +58,10 @@ func (f *fakeBackend) Complete(_ context.Context, r backend.CompletionRequest) (
 func (f *fakeBackend) Embed(_ context.Context, r backend.EmbeddingRequest) (*backend.Response, error) {
 	f.record("embedding", r.Body)
 	return f.respond("embedding", r.Body)
+}
+func (f *fakeBackend) Responses(_ context.Context, r backend.ResponsesRequest) (*backend.Response, error) {
+	f.record("responses", r.Body)
+	return f.respond("responses", r.Body)
 }
 
 func okResponse(body string) func(string, []byte) (*backend.Response, error) {
@@ -95,7 +99,7 @@ func startServer(t *testing.T, b *fakeBackend) string {
 
 func TestEndToEnd(t *testing.T) {
 	b := newFakeBackend("copilot", []string{"gpt-4o"})
-	b.respond = okResponse(`{"id":"x","object":"chat.completion"}`)
+	b.respond = okResponse(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"test"},"finish_reason":"stop"}],"created":1234567890}`)
 	base := startServer(t, b)
 
 	t.Run("health", func(t *testing.T) {
@@ -194,6 +198,7 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	t.Run("completion routes", func(t *testing.T) {
+		b.respond = okResponse(`{"id":"cmpl-1","object":"text_completion","choices":[{"index":0,"text":"test","finish_reason":"stop"}],"created":1234567890}`)
 		req := strings.NewReader(`{"model":"copilot/gpt-4o","prompt":"hi"}`)
 		resp, err := http.Post(base+"/v1/completions", "application/json", req)
 		if err != nil {
@@ -267,7 +272,7 @@ func TestEndToEnd(t *testing.T) {
 	})
 
 	t.Run("streaming chat flushes", func(t *testing.T) {
-		chunks := "data: {\"a\":1}\n\ndata: [DONE]\n\n"
+		chunks := "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
 		b.respond = func(string, []byte) (*backend.Response, error) {
 			return &backend.Response{
 				StatusCode: 200,
@@ -282,13 +287,16 @@ func TestEndToEnd(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		if string(body) != chunks {
-			t.Errorf("body = %q", string(body))
+
+		if !strings.Contains(string(body), "data:") {
+			t.Errorf("expected SSE events in body, got: %q", string(body))
 		}
-		// Connection header is hop-by-hop and must have been stripped.
-		// (Go's client may also drop it, but the assertion here is on
-		// what the proxy elects to forward upstream → downstream.)
-		_ = resp.Header
+		if !strings.Contains(string(body), "[DONE]") {
+			t.Errorf("expected [DONE] event in body, got: %q", string(body))
+		}
+		if !strings.Contains(string(body), "copilot/gpt-4o") {
+			t.Errorf("expected model prefix to be preserved, got: %q", string(body))
+		}
 	})
 }
 
@@ -319,5 +327,703 @@ func TestRun_GracefulShutdown(t *testing.T) {
 			t.Errorf("Run returned %v", err)
 		}
 	case <-context.Background().Done():
+	}
+}
+
+func TestHandleModels_OpenAISpecCompliance(t *testing.T) {
+	b := newFakeBackend("test", []string{"model-a", "model-b"})
+	baseURL := startServer(t, b)
+
+	resp, err := http.Get(baseURL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+
+	if result["object"] != "list" {
+		t.Errorf("expected object=list, got %v", result["object"])
+	}
+
+	data, ok := result["data"].([]any)
+	if !ok {
+		t.Fatalf("data field is not an array")
+	}
+
+	if len(data) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(data))
+	}
+
+	for _, item := range data {
+		model, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("model item is not an object")
+		}
+
+		if _, ok := model["id"]; !ok {
+			t.Error("missing required field: id")
+		}
+		if model["object"] != "model" {
+			t.Errorf("expected object=model, got %v", model["object"])
+		}
+		if _, ok := model["created"]; !ok {
+			t.Error("missing required field: created")
+		}
+		if _, ok := model["owned_by"]; !ok {
+			t.Error("missing required field: owned_by")
+		}
+
+		if _, ok := model["capabilities"]; ok {
+			t.Error("unexpected field 'capabilities' in /v1/models response")
+		}
+		if _, ok := model["token_limits"]; ok {
+			t.Error("unexpected field 'token_limits' in /v1/models response")
+		}
+		if _, ok := model["reasoning_effort_levels"]; ok {
+			t.Error("unexpected field 'reasoning_effort_levels' in /v1/models response")
+		}
+	}
+}
+
+func TestHandleModels_EmptyBackends(t *testing.T) {
+	reg := backend.NewRegistry()
+	srv := server.New(server.Options{Address: "127.0.0.1", Port: 0, Registry: reg})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	baseURL := "http://" + ln.Addr().String()
+
+	resp, err := http.Get(baseURL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := `{"object":"list","data":[]}`
+	var expectedJSON, actualJSON map[string]any
+	if err := json.Unmarshal([]byte(expected), &expectedJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &actualJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	if actualJSON["object"] != "list" {
+		t.Errorf("expected object=list, got %v", actualJSON["object"])
+	}
+
+	data, ok := actualJSON["data"].([]any)
+	if !ok {
+		t.Fatalf("data is not an array, got %T: %v", actualJSON["data"], actualJSON["data"])
+	}
+
+	if len(data) != 0 {
+		t.Errorf("expected empty data array, got %d items", len(data))
+	}
+}
+
+func TestHandleModelInfo_EmptyBackends(t *testing.T) {
+	reg := backend.NewRegistry()
+	srv := server.New(server.Options{Address: "127.0.0.1", Port: 0, Registry: reg})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	baseURL := "http://" + ln.Addr().String()
+
+	resp, err := http.Get(baseURL + "/v1/model/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var actualJSON map[string]any
+	if err := json.Unmarshal(body, &actualJSON); err != nil {
+		t.Fatal(err)
+	}
+
+	if actualJSON["object"] != "list" {
+		t.Errorf("expected object=list, got %v", actualJSON["object"])
+	}
+
+	data, ok := actualJSON["data"].([]any)
+	if !ok {
+		t.Fatalf("data is not an array, got %T: %v", actualJSON["data"], actualJSON["data"])
+	}
+
+	if len(data) != 0 {
+		t.Errorf("expected empty data array, got %d items", len(data))
+	}
+}
+
+func TestHandleResponses_ValidRequest(t *testing.T) {
+	b := newFakeBackend("openai", []string{"o1-preview"})
+	b.respond = okResponse(`{
+		"id": "resp-123",
+		"object": "response",
+		"choices": [{"message": {"role": "assistant", "content": "test"}}]
+	}`)
+	baseURL := startServer(t, b)
+
+	reqBody := `{"model":"openai/o1-preview","input":"What is 2+2?","reasoning":{"effort":"medium"}}`
+	resp, err := http.Post(baseURL+"/v1/responses", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	captured := b.get("responses")
+	if captured == nil {
+		t.Fatal("backend did not receive request")
+	}
+
+	var capturedReq map[string]any
+	if err := json.Unmarshal(captured, &capturedReq); err != nil {
+		t.Fatal(err)
+	}
+
+	if capturedReq["input"] != "What is 2+2?" {
+		t.Errorf("expected input field to be preserved, got %v", capturedReq["input"])
+	}
+
+	if capturedReq["model"] != "o1-preview" {
+		t.Errorf("expected model to be rewritten to o1-preview, got %v", capturedReq["model"])
+	}
+}
+
+func TestHandleResponses_MissingInput(t *testing.T) {
+	b := newFakeBackend("openai", []string{"o1"})
+	baseURL := startServer(t, b)
+
+	reqBody := `{"model":"openai/o1"}`
+	resp, err := http.Post(baseURL+"/v1/responses", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	var errResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+
+	errObj, ok := errResp["error"].(map[string]any)
+	if !ok {
+		t.Fatal("missing error object")
+	}
+
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "input") {
+		t.Errorf("expected error about missing input, got: %s", msg)
+	}
+}
+
+func TestHandleResponses_InvalidReasoningEffort(t *testing.T) {
+	b := newFakeBackend("openai", []string{"o1"})
+	baseURL := startServer(t, b)
+
+	tests := []struct {
+		name      string
+		reqBody   string
+		shouldErr bool
+	}{
+		{
+			name:      "valid low",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"low"}}`,
+			shouldErr: false,
+		},
+		{
+			name:      "valid medium",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"medium"}}`,
+			shouldErr: false,
+		},
+		{
+			name:      "valid high",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"high"}}`,
+			shouldErr: false,
+		},
+		{
+			name:      "invalid value",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"ultra"}}`,
+			shouldErr: true,
+		},
+		{
+			name:      "empty reasoning object",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{}}`,
+			shouldErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !tt.shouldErr {
+				b.respond = okResponse(`{"id":"resp-1","choices":[]}`)
+			}
+
+			resp, err := http.Post(baseURL+"/v1/responses", "application/json", strings.NewReader(tt.reqBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			if tt.shouldErr {
+				if resp.StatusCode != http.StatusBadRequest {
+					body, _ := io.ReadAll(resp.Body)
+					t.Fatalf("expected 400 for %s, got %d, body: %s", tt.name, resp.StatusCode, body)
+				}
+
+				var errResp map[string]any
+				if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+					t.Fatal(err)
+				}
+
+				errObj, ok := errResp["error"].(map[string]any)
+				if !ok {
+					t.Fatal("missing error object")
+				}
+
+				msg, _ := errObj["message"].(string)
+				if !strings.Contains(msg, "reasoning.effort") {
+					t.Errorf("expected error about reasoning.effort, got: %s", msg)
+				}
+			} else if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected 200 for %s, got %d, body: %s", tt.name, resp.StatusCode, body)
+			}
+		})
+	}
+}
+
+func TestHandleResponses_ErrUnsupported(t *testing.T) {
+	b := newFakeBackend("copilot", []string{"gpt-4o"})
+	b.respond = func(string, []byte) (*backend.Response, error) {
+		return nil, backend.ErrUnsupported
+	}
+	baseURL := startServer(t, b)
+
+	reqBody := `{"model":"copilot/gpt-4o","input":"test"}`
+	resp, err := http.Post(baseURL+"/v1/responses", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", resp.StatusCode)
+	}
+
+	var errResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+
+	errObj, ok := errResp["error"].(map[string]any)
+	if !ok {
+		t.Fatal("missing error object")
+	}
+
+	errType, _ := errObj["type"].(string)
+	if errType != "not_implemented" {
+		t.Errorf("expected error type not_implemented, got: %s", errType)
+	}
+}
+
+func TestHandleModelInfo_WithCapabilities(t *testing.T) {
+	b := newFakeBackend("openai", []string{"gpt-4o", "o1-preview"})
+	b.models = []backend.ModelInfo{
+		{
+			ID:           "gpt-4o",
+			Name:         "GPT-4o",
+			Vendor:       "openai",
+			Capabilities: []string{"chat", "tools", "vision"},
+			TokenLimits: &backend.TokenLimits{
+				MaxInputTokens:   128000,
+				MaxOutputTokens:  16384,
+				MaxContextTokens: 128000,
+			},
+		},
+		{
+			ID:                    "o1-preview",
+			Name:                  "o1-preview",
+			Vendor:                "openai",
+			Capabilities:          []string{"chat", "reasoning"},
+			ReasoningEffortLevels: []string{"low", "medium", "high"},
+			TokenLimits: &backend.TokenLimits{
+				MaxInputTokens:   128000,
+				MaxOutputTokens:  32768,
+				MaxContextTokens: 128000,
+			},
+		},
+	}
+
+	baseURL := startServer(t, b)
+
+	resp, err := http.Get(baseURL + "/v1/model/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+
+	if result["object"] != "list" {
+		t.Errorf("expected object=list, got %v", result["object"])
+	}
+
+	data, ok := result["data"].([]any)
+	if !ok {
+		t.Fatalf("data field is not an array")
+	}
+
+	if len(data) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(data))
+	}
+
+	gpt4o := data[0].(map[string]any)
+	if gpt4o["id"] != "openai/gpt-4o" {
+		t.Errorf("expected id=openai/gpt-4o, got %v", gpt4o["id"])
+	}
+	if gpt4o["vendor"] != "openai" {
+		t.Errorf("expected vendor=openai, got %v", gpt4o["vendor"])
+	}
+
+	caps, ok := gpt4o["capabilities"].([]any)
+	if !ok || len(caps) != 3 {
+		t.Errorf("expected 3 capabilities for gpt-4o, got %v", gpt4o["capabilities"])
+	}
+
+	tokenLimits, ok := gpt4o["token_limits"].(map[string]any)
+	if !ok {
+		t.Fatal("token_limits missing or invalid")
+	}
+	if tokenLimits["max_input_tokens"] != float64(128000) {
+		t.Errorf("expected max_input_tokens=128000, got %v", tokenLimits["max_input_tokens"])
+	}
+
+	o1 := data[1].(map[string]any)
+	if o1["id"] != "openai/o1-preview" {
+		t.Errorf("expected id=openai/o1-preview, got %v", o1["id"])
+	}
+
+	reasoningLevels, ok := o1["reasoning_effort_levels"].([]any)
+	if !ok || len(reasoningLevels) != 3 {
+		t.Errorf("expected 3 reasoning effort levels for o1-preview, got %v", o1["reasoning_effort_levels"])
+	}
+}
+
+func TestModelCapabilityDifferences(t *testing.T) {
+	copilotBackend := newFakeBackend("copilot", []string{"gpt-4o"})
+	copilotBackend.models = []backend.ModelInfo{
+		{
+			ID:           "gpt-4o",
+			Name:         "GPT-4o",
+			Vendor:       "github",
+			Capabilities: []string{"chat", "tools", "streaming"},
+			TokenLimits: &backend.TokenLimits{
+				MaxInputTokens:   128000,
+				MaxOutputTokens:  4096,
+				MaxContextTokens: 128000,
+			},
+		},
+	}
+
+	openaiBackend := newFakeBackend("openai", []string{"gpt-4o"})
+	openaiBackend.models = []backend.ModelInfo{
+		{
+			ID:           "gpt-4o",
+			Name:         "GPT-4o",
+			Vendor:       "openai",
+			Capabilities: []string{"chat", "tools", "vision", "streaming"},
+			TokenLimits: &backend.TokenLimits{
+				MaxInputTokens:   128000,
+				MaxOutputTokens:  16384,
+				MaxContextTokens: 128000,
+			},
+		},
+	}
+
+	reg := backend.NewRegistry()
+	if err := reg.Register(copilotBackend); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(openaiBackend); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := server.New(server.Options{Address: "127.0.0.1", Port: 0, Registry: reg})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	baseURL := "http://" + ln.Addr().String()
+
+	resp, err := http.Get(baseURL + "/v1/model/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+
+	data, ok := result["data"].([]any)
+	if !ok {
+		t.Fatalf("data field is not an array")
+	}
+
+	if len(data) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(data))
+	}
+
+	var copilotModel, openaiModel map[string]any
+	for _, item := range data {
+		model := item.(map[string]any)
+		id := model["id"].(string)
+		switch id {
+		case "copilot/gpt-4o":
+			copilotModel = model
+		case "openai/gpt-4o":
+			openaiModel = model
+		}
+	}
+
+	if copilotModel == nil || openaiModel == nil {
+		t.Fatal("missing expected models in response")
+	}
+
+	copilotCaps := copilotModel["capabilities"].([]any)
+	openaiCaps := openaiModel["capabilities"].([]any)
+
+	if len(openaiCaps) <= len(copilotCaps) {
+		t.Error("expected openai/gpt-4o to have more capabilities than copilot/gpt-4o")
+	}
+
+	hasVision := false
+	for _, cap := range openaiCaps {
+		if cap == "vision" {
+			hasVision = true
+			break
+		}
+	}
+	if !hasVision {
+		t.Error("expected openai/gpt-4o to have vision capability")
+	}
+
+	for _, cap := range copilotCaps {
+		if cap == "vision" {
+			t.Error("copilot/gpt-4o should not have vision capability")
+		}
+	}
+
+	copilotLimits := copilotModel["token_limits"].(map[string]any)
+	openaiLimits := openaiModel["token_limits"].(map[string]any)
+
+	if copilotLimits["max_output_tokens"].(float64) != 4096 {
+		t.Errorf("expected copilot/gpt-4o max_output_tokens=4096, got %v", copilotLimits["max_output_tokens"])
+	}
+
+	if openaiLimits["max_output_tokens"].(float64) != 16384 {
+		t.Errorf("expected openai/gpt-4o max_output_tokens=16384, got %v", openaiLimits["max_output_tokens"])
+	}
+}
+
+func TestTransformNonConformantBackendResponses(t *testing.T) {
+	tests := []struct {
+		name         string
+		endpoint     string
+		reqBody      string
+		backendBody  string
+		expectStatus int
+	}{
+		{
+			name:     "chat missing choices array",
+			endpoint: "/v1/chat/completions",
+			reqBody:  `{"model":"test/gpt-4o","messages":[{"role":"user","content":"hi"}]}`,
+			backendBody: `{
+				"id": "chat-123",
+				"object": "chat.completion"
+			}`,
+			expectStatus: 502,
+		},
+		{
+			name:     "completion missing choices",
+			endpoint: "/v1/completions",
+			reqBody:  `{"model":"test/gpt-4o","prompt":"hi"}`,
+			backendBody: `{
+				"id": "cmpl-123",
+				"object": "text_completion"
+			}`,
+			expectStatus: 502,
+		},
+		{
+			name:     "embedding missing data array",
+			endpoint: "/v1/embeddings",
+			reqBody:  `{"model":"test/embed","input":"test"}`,
+			backendBody: `{
+				"object": "list"
+			}`,
+			expectStatus: 502,
+		},
+		{
+			name:     "responses missing choices",
+			endpoint: "/v1/responses",
+			reqBody:  `{"model":"test/o1","input":"test"}`,
+			backendBody: `{
+				"id": "resp-123",
+				"object": "response"
+			}`,
+			expectStatus: 502,
+		},
+		{
+			name:         "invalid JSON from backend",
+			endpoint:     "/v1/chat/completions",
+			reqBody:      `{"model":"test/gpt-4o","messages":[]}`,
+			backendBody:  `{invalid json that cannot be parsed`,
+			expectStatus: 502,
+		},
+		{
+			name:         "plain text response from backend",
+			endpoint:     "/v1/chat/completions",
+			reqBody:      `{"model":"test/gpt-4o","messages":[]}`,
+			backendBody:  `Internal Server Error`,
+			expectStatus: 502,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := newFakeBackend("test", []string{"gpt-4o", "embed", "o1"})
+			b.respond = func(string, []byte) (*backend.Response, error) {
+				return &backend.Response{
+					StatusCode: 200,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(tt.backendBody)),
+				}, nil
+			}
+			baseURL := startServer(t, b)
+
+			resp, err := http.Post(baseURL+tt.endpoint, "application/json", strings.NewReader(tt.reqBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != tt.expectStatus {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected status %d, got %d, body: %s", tt.expectStatus, resp.StatusCode, body)
+			}
+
+			var errResp map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, ok := errResp["error"]; !ok {
+				t.Error("expected error object in response")
+			}
+		})
 	}
 }

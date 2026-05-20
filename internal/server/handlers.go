@@ -11,11 +11,21 @@ import (
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/router"
+	"github.com/thelonelyghost/llm-proxy/internal/transform"
 )
 
 // maxBodyBytes caps the size of incoming JSON bodies. 8 MiB is generous for
 // chat payloads while preventing slowloris-style memory exhaustion.
 const maxBodyBytes = 8 << 20
+
+type endpointType int
+
+const (
+	endpointChat endpointType = iota
+	endpointCompletion
+	endpointEmbedding
+	endpointResponses
+)
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -38,8 +48,31 @@ type modelList struct {
 	Data   []modelListItem `json:"data"`
 }
 
+type modelInfoItem struct {
+	ID                    string            `json:"id"`
+	Name                  string            `json:"name,omitempty"`
+	Vendor                string            `json:"vendor"`
+	Capabilities          []string          `json:"capabilities,omitempty"`
+	TokenLimits           *tokenLimits      `json:"token_limits,omitempty"`
+	ReasoningEffortLevels []string          `json:"reasoning_effort_levels,omitempty"`
+	Deprecated            bool              `json:"deprecated"`
+	Version               string            `json:"version,omitempty"`
+	Extras                map[string]string `json:"extras,omitempty"`
+}
+
+type tokenLimits struct {
+	MaxInputTokens   int `json:"max_input_tokens,omitempty"`
+	MaxOutputTokens  int `json:"max_output_tokens,omitempty"`
+	MaxContextTokens int `json:"max_context_tokens,omitempty"`
+}
+
+type modelInfoList struct {
+	Object string          `json:"object"`
+	Data   []modelInfoItem `json:"data"`
+}
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
-	out := modelList{Object: "list"}
+	out := modelList{Object: "list", Data: []modelListItem{}}
 	for _, b := range s.registry.All() {
 		models, err := b.Models(r.Context())
 		if err != nil {
@@ -51,8 +84,42 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				ID:      router.Format(b.Name(), m.ID),
 				Object:  "model",
 				Created: 0,
-				OwnedBy: m.OwnedBy,
+				OwnedBy: b.Name(),
 			})
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleModelInfo(w http.ResponseWriter, r *http.Request) {
+	out := modelInfoList{Object: "list", Data: []modelInfoItem{}}
+	for _, b := range s.registry.All() {
+		models, err := b.Models(r.Context())
+		if err != nil {
+			s.logger.Warn("backend models error", "backend", b.Name(), "err", err)
+			continue
+		}
+		for _, m := range models {
+			item := modelInfoItem{
+				ID:                    router.Format(b.Name(), m.ID),
+				Name:                  m.Name,
+				Vendor:                b.Name(),
+				Capabilities:          m.Capabilities,
+				ReasoningEffortLevels: m.ReasoningEffortLevels,
+				Deprecated:            m.Deprecated,
+				Version:               m.Version,
+				Extras:                m.Extras,
+			}
+
+			if m.TokenLimits != nil {
+				item.TokenLimits = &tokenLimits{
+					MaxInputTokens:   m.TokenLimits.MaxInputTokens,
+					MaxOutputTokens:  m.TokenLimits.MaxOutputTokens,
+					MaxContextTokens: m.TokenLimits.MaxContextTokens,
+				}
+			}
+
+			out.Data = append(out.Data, item)
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -111,26 +178,100 @@ func (s *Server) lookupBackend(w http.ResponseWriter, name string) (backend.Back
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+	s.handleModelRequest(w, r, endpointChat, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
 		return b.Chat(ctx, backend.ChatRequest{Model: route.Model, Stream: stream, Body: body})
 	})
 }
 
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+	s.handleModelRequest(w, r, endpointCompletion, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
 		return b.Complete(ctx, backend.CompletionRequest{Model: route.Model, Stream: stream, Body: body})
 	})
 }
 
 func (s *Server) handleEmbedding(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, _ bool) (*backend.Response, error) {
+	s.handleModelRequest(w, r, endpointEmbedding, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, _ bool) (*backend.Response, error) {
 		return b.Embed(ctx, backend.EmbeddingRequest{Model: route.Model, Body: body})
 	})
+}
+
+func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	body, ok := s.readBody(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Model     string `json:"model"`
+		Input     string `json:"input"`
+		Stream    bool   `json:"stream,omitempty"`
+		Reasoning *struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning,omitempty"`
+	}
+
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
+		return
+	}
+
+	if req.Input == "" {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "request missing required field \"input\"")
+		return
+	}
+
+	if req.Model == "" {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "request missing required field \"model\"")
+		return
+	}
+
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
+		validEfforts := map[string]bool{"low": true, "medium": true, "high": true}
+		if !validEfforts[req.Reasoning.Effort] {
+			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "reasoning.effort must be \"low\", \"medium\", or \"high\"")
+			return
+		}
+	}
+
+	route, err := router.Parse(req.Model)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	b, ok := s.lookupBackend(w, route.Backend)
+	if !ok {
+		return
+	}
+
+	rewritten := make(map[string]any)
+	if err := json.Unmarshal(body, &rewritten); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "failed to parse request")
+		return
+	}
+	rewritten["model"] = route.Model
+	rewrittenBody, _ := json.Marshal(rewritten)
+
+	var reasoning *backend.Reasoning
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
+		reasoning = &backend.Reasoning{Effort: req.Reasoning.Effort}
+	}
+
+	resp, err := b.Responses(r.Context(), backend.ResponsesRequest{
+		Model:     route.Model,
+		Stream:    req.Stream,
+		Input:     req.Input,
+		Reasoning: reasoning,
+		Body:      rewrittenBody,
+	})
+
+	s.writeUpstreamResponse(w, resp, err, req.Stream, endpointResponses, router.Format(b.Name(), route.Model))
 }
 
 func (s *Server) handleModelRequest(
 	w http.ResponseWriter,
 	r *http.Request,
+	epType endpointType,
 	op func(context.Context, backend.Backend, router.Route, []byte, bool) (*backend.Response, error),
 ) {
 	body, ok := s.readBody(w, r)
@@ -147,12 +288,12 @@ func (s *Server) handleModelRequest(
 		return
 	}
 	resp, err := op(r.Context(), b, route, rewritten, stream)
-	s.writeUpstreamResponse(w, resp, err, stream)
+	s.writeUpstreamResponse(w, resp, err, stream, epType, router.Format(b.Name(), route.Model))
 }
 
 // writeUpstreamResponse maps a backend.Response (or error) onto the client's
-// http.ResponseWriter, preserving headers and streaming semantics.
-func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Response, err error, stream bool) {
+// http.ResponseWriter, applying transformation and preserving streaming semantics.
+func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Response, err error, stream bool, epType endpointType, modelPrefix string) {
 	if err != nil {
 		switch {
 		case errors.Is(err, backend.ErrUnsupported):
@@ -169,8 +310,31 @@ func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Resp
 		writeAPIError(w, http.StatusBadGateway, "upstream_error", "empty response from backend")
 		return
 	}
-	// Copy hop-by-hop-safe headers.
-	for k, vv := range resp.Header {
+
+	var transformed *transform.TransformResult
+	var transformErr error
+
+	switch epType {
+	case endpointChat:
+		transformed, transformErr = transform.TransformChatResponse(resp.StatusCode, resp.Body, stream, modelPrefix)
+	case endpointCompletion:
+		transformed, transformErr = transform.TransformCompletionResponse(resp.StatusCode, resp.Body, stream, modelPrefix)
+	case endpointEmbedding:
+		transformed, transformErr = transform.TransformEmbeddingResponse(resp.StatusCode, resp.Body, modelPrefix)
+	case endpointResponses:
+		transformed, transformErr = transform.TransformResponsesResponse(resp.StatusCode, resp.Body, stream, modelPrefix)
+	default:
+		writeAPIError(w, http.StatusInternalServerError, "internal_error", "unknown endpoint type")
+		return
+	}
+
+	if transformErr != nil {
+		s.logger.Error("transformation error", "err", transformErr)
+		writeAPIError(w, http.StatusBadGateway, "upstream_error", "failed to transform backend response")
+		return
+	}
+
+	for k, vv := range transformed.Header {
 		if isHopByHop(k) {
 			continue
 		}
@@ -178,8 +342,8 @@ func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Resp
 			w.Header().Add(k, v)
 		}
 	}
-	w.WriteHeader(resp.StatusCode)
-	copyBody(w, resp.Body, stream)
+	w.WriteHeader(transformed.StatusCode)
+	copyBody(w, transformed.Body, stream)
 }
 
 func isHopByHop(h string) bool {

@@ -196,10 +196,34 @@ func (p *Provider) Auth() *Authenticator { return p.auth }
 // We intentionally do not query Copilot's /models endpoint here because the
 // upstream list churns and depends on the user's entitlement; operators
 // should pin the models they trust in HCL.
-func (p *Provider) Models(_ context.Context) ([]backend.Model, error) {
-	out := make([]backend.Model, 0, len(p.models))
+func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
+	// If no models configured, return empty list (allow-list mode)
+	if len(p.models) == 0 {
+		return nil, nil
+	}
+
+	// Get full model metadata from upstream
+	allModels, err := p.ListUpstreamModels(ctx)
+	if err != nil {
+		// Fallback to minimal ModelInfo if upstream query fails
+		out := make([]backend.ModelInfo, 0, len(p.models))
+		for _, m := range p.models {
+			out = append(out, backend.ModelInfo{ID: m, Vendor: p.name})
+		}
+		return out, nil
+	}
+
+	// Filter to configured allow-list
+	modelSet := make(map[string]bool, len(p.models))
 	for _, m := range p.models {
-		out = append(out, backend.Model{ID: m, OwnedBy: p.name})
+		modelSet[m] = true
+	}
+
+	out := make([]backend.ModelInfo, 0, len(p.models))
+	for _, info := range allModels {
+		if modelSet[info.ID] {
+			out = append(out, info)
+		}
 	}
 	return out, nil
 }
@@ -226,6 +250,12 @@ func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*ba
 		return nil, err
 	}
 	return p.forward(ctx, "POST", "/embeddings", req.Body, false)
+}
+
+// Responses forwards a unified response request to Copilot.
+// Returns ErrUnsupported as Copilot does not currently support reasoning models.
+func (p *Provider) Responses(ctx context.Context, req backend.ResponsesRequest) (*backend.Response, error) {
+	return nil, fmt.Errorf("%w: copilot does not support /responses endpoint", backend.ErrUnsupported)
 }
 
 // allowed enforces the configured model allow-list. An empty allow-list

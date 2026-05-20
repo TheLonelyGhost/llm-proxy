@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/paths"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/copilot"
 )
 
@@ -55,7 +56,13 @@ func newLoginCmd(out io.Writer) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&cfgPath, "config", "c", defaultConfigPath(), "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
+	var cfgDefault string
+	if p, err := paths.ConfigFile(); err == nil {
+		cfgDefault = p
+	} else {
+		cfgDefault = defaultConfigPath()
+	}
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", cfgDefault, "path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
 	return cmd
 }
 

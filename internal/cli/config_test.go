@@ -29,6 +29,15 @@ func TestResolveConfigPath_Precedence(t *testing.T) {
 		}
 	})
 
+	t.Run("default flag beats built-in fallback", func(t *testing.T) {
+		cmd := &cobra.Command{}
+		cmd.Flags().StringP("config", "c", "/tmp/from-default.hcl", "")
+		t.Setenv(configEnvVar, "")
+		if got := resolveConfigPath(cmd, "/tmp/from-default.hcl"); got != "/tmp/from-default.hcl" {
+			t.Fatalf("default flag precedence: got %q", got)
+		}
+	})
+
 	t.Run("default depends on os", func(t *testing.T) {
 		cmd3 := &cobra.Command{}
 		cmd3.Flags().StringP("config", "c", "", "")

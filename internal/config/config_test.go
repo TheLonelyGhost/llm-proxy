@@ -47,6 +47,12 @@ backend "copilot" {
 	if len(cfg.Backends[0].Models) != 2 {
 		t.Errorf("models = %v", cfg.Backends[0].Models)
 	}
+	if cfg.SourcePath != p {
+		t.Errorf("SourcePath = %q, want %q", cfg.SourcePath, p)
+	}
+	if len(cfg.SourceFiles) != 1 || cfg.SourceFiles[0] != p {
+		t.Errorf("SourceFiles = %v, want [%q]", cfg.SourceFiles, p)
+	}
 }
 
 func TestLoad_Directory(t *testing.T) {
@@ -77,6 +83,20 @@ backend "copilot" {
 	}
 	if len(cfg.Backends) != 1 {
 		t.Fatalf("backends = %v", cfg.Backends)
+	}
+	if cfg.SourcePath != dir {
+		t.Errorf("SourcePath = %q, want %q", cfg.SourcePath, dir)
+	}
+	if len(cfg.SourceFiles) != 2 {
+		t.Errorf("SourceFiles = %v, expected 2 files", cfg.SourceFiles)
+	}
+	for _, f := range cfg.SourceFiles {
+		if !strings.HasPrefix(f, dir) {
+			t.Errorf("SourceFile %q doesn't start with dir %q", f, dir)
+		}
+		if !strings.HasSuffix(f, ".hcl") {
+			t.Errorf("SourceFile %q doesn't end with .hcl", f)
+		}
 	}
 }
 

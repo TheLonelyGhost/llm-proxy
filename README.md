@@ -4,7 +4,8 @@ An authenticating OpenAI-compatible HTTP proxy that fronts pluggable LLM
 backends. Clients talk to `llm-proxy` exactly as they would talk to the OpenAI
 API; the proxy strips the client's `Authorization` header, picks an upstream
 provider based on the requested model, injects the provider's own credentials,
-and forwards the request (streaming preserved).
+and forwards the request (streaming preserved). All responses are transformed
+to strict OpenAI API specification compliance.
 
 Currently supported backends:
 
@@ -14,8 +15,16 @@ Currently supported backends:
 
 ## Features
 
-- OpenAI-compatible endpoints: `/v1/chat/completions` (SSE streaming),
-  `/v1/completions`, `/v1/embeddings`, `/v1/models`, plus `/healthz`.
+- **OpenAI API Compliance**: All backend responses are transformed to match the
+  OpenAI API specification exactly, ensuring compatibility with any OpenAI client.
+- **OpenAI-compatible endpoints**:
+  - `/v1/chat/completions` - Chat completions (SSE streaming supported)
+  - `/v1/completions` - Legacy text completions
+  - `/v1/embeddings` - Text embeddings
+  - `/v1/responses` - Unified response objects with reasoning effort support
+  - `/v1/models` - Aggregated model list (OpenAI spec format)
+  - `/v1/model/info` - Extended model metadata with capabilities, token limits, and reasoning effort levels
+  - `/healthz` - Health check endpoint
 - HCL2 configuration: single file _or_ directory of `*.hcl` files; supports
   `env("NAME")` interpolation so secrets never need to live on disk. The
   config path comes from `-c` / `--config`, then `LLM_PROXY_CONFIG`, then
@@ -50,6 +59,50 @@ curl http://127.0.0.1:4980/v1/chat/completions \
 ```
 
 See [`docs/configuration.md`](docs/configuration.md) for the full HCL schema.
+
+## Advanced Features
+
+### Reasoning Models and /v1/responses
+
+The `/v1/responses` endpoint provides unified response objects with reasoning
+effort support for models like OpenAI o1 and o3:
+
+```sh
+curl http://127.0.0.1:4980/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openai/o1-preview",
+    "input": "What is the meaning of life?",
+    "reasoning": {"effort": "medium"}
+  }'
+```
+
+The `reasoning.effort` parameter accepts "low", "medium", or "high" to control
+the amount of reasoning tokens used. The response includes `reasoning_tokens`
+in the usage field.
+
+### Model Capability Discovery
+
+The `/v1/model/info` endpoint returns extended model metadata including
+capabilities, token limits, and reasoning effort levels:
+
+```sh
+curl http://127.0.0.1:4980/v1/model/info
+```
+
+This helps clients discover which models support features like:
+- `chat` - Chat completion API
+- `tools` - Function calling
+- `vision` - Image inputs
+- `reasoning` - Chain-of-thought reasoning
+- `streaming` - SSE streaming
+- `embeddings` - Text embeddings
+
+Token limits (`max_input_tokens`, `max_output_tokens`, `max_context_tokens`)
+and reasoning effort levels are also exposed when available from the backend.
+
+**Note:** The standard `/v1/models` endpoint returns only OpenAI spec fields
+for maximum compatibility. Use `/v1/model/info` for extended metadata.
 
 ## Listing upstream models
 
