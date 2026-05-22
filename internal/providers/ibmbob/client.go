@@ -31,6 +31,11 @@ const maxRetryPeekBytes = 8 << 10
 
 // forward issues an outbound request, retrying on retryable failures, and
 // returns a backend.Response whose Body is owned by the caller.
+//
+// All current callers pass http.MethodPost; the method parameter is kept to
+// keep the helper general for future endpoints (e.g. GET /v1/responses/{id}).
+//
+//nolint:unparam // method retained for future non-POST callers
 func (p *Provider) forward(ctx context.Context, method, path string, body []byte, stream bool) (*backend.Response, error) {
 	ctx, span := p.tracer.Start(ctx, "ibmbob.forward")
 	defer span.End()

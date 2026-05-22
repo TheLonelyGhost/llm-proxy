@@ -278,45 +278,60 @@ func TestTransformStreamingCompletionResponse(t *testing.T) {
 }
 
 func TestTransformStreamingResponsesResponse(t *testing.T) {
+	// Real OpenAI / LiteLLM /v1/responses SSE format: each block is
+	//   event: <event-type>
+	//   data: <json>
+	// Blocks may also be `data: [DONE]` or SSE comment lines.
 	tests := []struct {
 		name        string
 		input       string
 		modelPrefix string
-		wantEvents  []map[string]any
-		wantDone    bool
+		wantBlocks  []string // exact blocks (each ending with \n\n) the transformer should emit, in order
 	}{
 		{
-			name: "reasoning chunk",
-			input: `data: {"id":"resp-123","object":"response.chunk","created":1677652288,"model":"o1-preview","choices":[{"index":0,"delta":{"content":"thinking...","reasoning":"analyzing"},"finish_reason":null}]}
-
-`,
-			modelPrefix: "openai/o1-preview",
-			wantEvents: []map[string]any{
-				{
-					"id":      "resp-123",
-					"object":  "response.chunk",
-					"created": float64(1677652288),
-					"model":   "openai/o1-preview",
-					"choices": []any{
-						map[string]any{
-							"index": float64(0),
-							"delta": map[string]any{
-								"content":   "thinking...",
-								"reasoning": "analyzing",
-							},
-							"finish_reason": nil,
-						},
-					},
-				},
+			name: "named events with model rewriting",
+			input: "event: response.created\n" +
+				`data: {"type":"response.created","response":{"id":"resp_1","model":"premium","status":"in_progress"}}` + "\n" +
+				"\n" +
+				"event: response.output_text.delta\n" +
+				`data: {"type":"response.output_text.delta","delta":"H","item_id":"msg_1","output_index":0,"content_index":0}` + "\n" +
+				"\n" +
+				"event: response.output_text.delta\n" +
+				`data: {"type":"response.output_text.delta","delta":"i","item_id":"msg_1","output_index":0,"content_index":0}` + "\n" +
+				"\n" +
+				"event: response.completed\n" +
+				`data: {"type":"response.completed","response":{"id":"resp_1","model":"premium","status":"completed"}}` + "\n" +
+				"\n",
+			modelPrefix: "bob/premium",
+			wantBlocks: []string{
+				`event: response.created` + "\n" +
+					`data: {"type":"response.created","response":{"id":"resp_1","model":"bob/premium","status":"in_progress"}}` + "\n\n",
+				`event: response.output_text.delta` + "\n" +
+					`data: {"type":"response.output_text.delta","delta":"H","item_id":"msg_1","output_index":0,"content_index":0}` + "\n\n",
+				`event: response.output_text.delta` + "\n" +
+					`data: {"type":"response.output_text.delta","delta":"i","item_id":"msg_1","output_index":0,"content_index":0}` + "\n\n",
+				`event: response.completed` + "\n" +
+					`data: {"type":"response.completed","response":{"id":"resp_1","model":"bob/premium","status":"completed"}}` + "\n\n",
 			},
 		},
 		{
-			name: "done event",
-			input: `data: [DONE]
-
-`,
-			modelPrefix: "openai/o1",
-			wantDone:    true,
+			name: "done sentinel preserved",
+			input: "event: response.completed\n" +
+				`data: {"type":"response.completed","response":{"id":"resp_1"}}` + "\n" +
+				"\n" +
+				"data: [DONE]\n\n",
+			modelPrefix: "bob/premium",
+			wantBlocks: []string{
+				`event: response.completed` + "\n" +
+					`data: {"type":"response.completed","response":{"id":"resp_1"}}` + "\n\n",
+				"data: [DONE]\n\n",
+			},
+		},
+		{
+			name:        "sse comment passes through",
+			input:       ": keep-alive\n\n",
+			modelPrefix: "bob/premium",
+			wantBlocks:  []string{": keep-alive\n\n"},
 		},
 	}
 
@@ -326,52 +341,72 @@ func TestTransformStreamingResponsesResponse(t *testing.T) {
 			transformer := TransformStreamingResponsesResponse(body, tt.modelPrefix)
 			defer transformer.Close()
 
-			gotEvents := []map[string]any{}
-			gotDone := false
-			buf := make([]byte, 4096)
+			var gotBlocks []string
+			buf := make([]byte, 8192)
 			for {
 				n, err := transformer.Read(buf)
+				if n > 0 {
+					gotBlocks = append(gotBlocks, string(buf[:n]))
+				}
 				if err == io.EOF {
 					break
 				}
 				if err != nil {
 					t.Fatalf("Read() error = %v", err)
 				}
-				if n > 0 {
-					chunk := strings.TrimSpace(string(buf[:n]))
-					if strings.HasPrefix(chunk, "data: ") {
-						data := strings.TrimPrefix(chunk, "data: ")
-						if data == "[DONE]" {
-							gotDone = true
-						} else {
-							var event map[string]any
-							if err := json.Unmarshal([]byte(data), &event); err != nil {
-								t.Fatalf("failed to parse event JSON: %v", err)
-							}
-							gotEvents = append(gotEvents, event)
-						}
-					}
-				}
 			}
 
-			if tt.wantDone {
-				if !gotDone {
-					t.Error("expected [DONE] event but did not receive it")
-				}
-				return
+			if len(gotBlocks) != len(tt.wantBlocks) {
+				t.Fatalf("emitted %d blocks, want %d\n got=%q\nwant=%q",
+					len(gotBlocks), len(tt.wantBlocks), gotBlocks, tt.wantBlocks)
 			}
 
-			if len(gotEvents) != len(tt.wantEvents) {
-				t.Fatalf("expected %d events, got %d", len(tt.wantEvents), len(gotEvents))
-			}
-
-			for i := range gotEvents {
-				if !reflect.DeepEqual(gotEvents[i], tt.wantEvents[i]) {
-					t.Errorf("event %d mismatch:\nwant: %#v\ngot:  %#v", i, tt.wantEvents[i], gotEvents[i])
+			for i, got := range gotBlocks {
+				// Compare the event line literally and JSON-equality on the
+				// data payload (so map key ordering differences are tolerated).
+				if !sseBlocksEqual(got, tt.wantBlocks[i]) {
+					t.Errorf("block %d mismatch:\n got=%q\nwant=%q", i, got, tt.wantBlocks[i])
 				}
 			}
 		})
 	}
+}
+
+// sseBlocksEqual compares two SSE blocks (each ending with \n\n). For data
+// lines carrying JSON, it compares parsed JSON for equality so map key order
+// does not matter.
+func sseBlocksEqual(a, b string) bool {
+	splitBlock := func(s string) (event, data string) {
+		s = strings.TrimSuffix(s, "\n\n")
+		for _, line := range strings.Split(s, "\n") {
+			switch {
+			case strings.HasPrefix(line, "event:"):
+				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			case strings.HasPrefix(line, "data:"):
+				data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			case strings.HasPrefix(line, ":"):
+				event = line // treat comment as the event marker for equality
+			}
+		}
+		return event, data
+	}
+	ae, ad := splitBlock(a)
+	be, bd := splitBlock(b)
+	if ae != be {
+		return false
+	}
+	if ad == bd {
+		return true
+	}
+	// JSON equality.
+	var ax, bx any
+	if err := json.Unmarshal([]byte(ad), &ax); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(bd), &bx); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(ax, bx)
 }
 
 func TestStreamTransformer_EmptyStream(t *testing.T) {

@@ -15,14 +15,17 @@
 package copilot
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/responsesshim"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
@@ -270,10 +273,69 @@ func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*ba
 	return p.forward(ctx, "POST", "/embeddings", req.Body, false)
 }
 
-// Responses forwards a unified response request to Copilot.
-// Returns ErrUnsupported as Copilot does not currently support reasoning models.
+// Responses implements the OpenAI /v1/responses surface by translating the
+// request into a /chat/completions call against Copilot's upstream, then
+// translating the response (JSON or SSE) back into the Responses API shape.
+// See responses_shim.go for the supported subset and explicit non-goals.
 func (p *Provider) Responses(ctx context.Context, req backend.ResponsesRequest) (*backend.Response, error) {
-	return nil, fmt.Errorf("%w: copilot does not support /responses endpoint", backend.ErrUnsupported)
+	if err := p.allowed(req.Model); err != nil {
+		return nil, err
+	}
+
+	chatBody, _, _, err := responsesshim.TranslateRequest(req.Body)
+	if err != nil {
+		return nil, fmt.Errorf("translate /v1/responses request: %w", err)
+	}
+
+	resp, err := p.forward(ctx, "POST", "/chat/completions", chatBody, req.Stream)
+	if err != nil {
+		return nil, err
+	}
+
+	// On non-2xx, pass the upstream response through so the server's error
+	// envelope handling kicks in unchanged.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp, nil
+	}
+
+	modelPrefix := p.name + "/" + req.Model
+
+	if req.Stream {
+		resp.Body = responsesshim.TranslateChatStreamToResponses(resp.Body, modelPrefix)
+		// Surface the proxy as an SSE source; the server's transform layer
+		// will pass these named events through unchanged.
+		resp.Header = cloneHeader(resp.Header)
+		resp.Header.Set("Content-Type", "text/event-stream")
+		resp.Header.Set("Cache-Control", "no-cache")
+		return resp, nil
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read upstream chat response: %w", err)
+	}
+	translated, err := responsesshim.TranslateChatCompletion(raw, modelPrefix)
+	if err != nil {
+		return nil, err
+	}
+	hdr := cloneHeader(resp.Header)
+	hdr.Set("Content-Type", "application/json")
+	return &backend.Response{
+		StatusCode: resp.StatusCode,
+		Header:     hdr,
+		Body:       io.NopCloser(bytes.NewReader(translated)),
+	}, nil
+}
+
+// cloneHeader returns a deep-ish copy of an http.Header so we can mutate it
+// without affecting upstream-owned state.
+func cloneHeader(h http.Header) http.Header {
+	out := make(http.Header, len(h))
+	for k, vv := range h {
+		out[k] = append([]string(nil), vv...)
+	}
+	return out
 }
 
 // allowed enforces the configured model allow-list. An empty allow-list

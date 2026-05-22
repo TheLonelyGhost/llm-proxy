@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -444,5 +445,183 @@ func TestCompleteAndEmbed(t *testing.T) {
 	r2.Body.Close()
 	if r2.StatusCode != 200 {
 		t.Errorf("embed status = %d", r2.StatusCode)
+	}
+}
+
+// --- /v1/responses end-to-end against a fake Copilot upstream ---
+
+func TestEndToEnd_Responses_NonStreaming(t *testing.T) {
+	dir := t.TempDir()
+	store := copilot.NewFileTokenStoreAt(filepath.Join(dir, "cfg"), filepath.Join(dir, "cache"))
+
+	var receivedBody []byte
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/copilot_internal/v2/token", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"token": "cop_xyz", "expires_at": time.Now().Add(30 * time.Minute).Unix()})
+	})
+	cpMux := http.NewServeMux()
+	cpMux.HandleFunc("/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		writeJSON(w, map[string]any{
+			"id":      "chatcmpl-1",
+			"object":  "chat.completion",
+			"created": 1700000000,
+			"choices": []any{
+				map[string]any{
+					"index":         0,
+					"message":       map[string]any{"role": "assistant", "content": "Hello!"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		})
+	})
+
+	apiSrv := httptest.NewServer(apiMux)
+	cpSrv := httptest.NewServer(cpMux)
+	t.Cleanup(func() { apiSrv.Close(); cpSrv.Close() })
+
+	// Seed a valid GitHub OAuth token directly so we don't need to drive the
+	// device-code flow.
+	if err := store.SaveGitHubToken(&copilot.GitHubToken{AccessToken: "gho_test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	block := buildBlock(t, fmt.Sprintf(`
+        models                = ["gpt-4o"]
+        api_base              = %q
+        github_api_base       = %q
+        request_timeout       = "5s"
+    `, cpSrv.URL, apiSrv.URL))
+	p, err := copilot.New(block, copilot.Options{TokenStore: store, IntervalUnit: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := p.Responses(context.Background(), backend.ResponsesRequest{
+		Model: "gpt-4o",
+		Body:  []byte(`{"model":"gpt-4o","input":"Say hi","max_output_tokens":32}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	// Upstream received a /chat/completions body.
+	var upstream map[string]any
+	if err := json.Unmarshal(receivedBody, &upstream); err != nil {
+		t.Fatal(err)
+	}
+	if upstream["max_tokens"] != float64(32) {
+		t.Errorf("max_tokens not forwarded: %+v", upstream)
+	}
+	msgs := upstream["messages"].([]any)
+	if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "Say hi" {
+		t.Errorf("messages malformed: %+v", msgs)
+	}
+
+	// Client receives Responses-shaped JSON.
+	body, _ := io.ReadAll(resp.Body)
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("client body: %v", err)
+	}
+	if out["object"] != "response" || out["status"] != "completed" {
+		t.Errorf("response envelope: %+v", out)
+	}
+	output := out["output"].([]any)
+	if len(output) != 1 || output[0].(map[string]any)["type"] != "message" {
+		t.Errorf("output not a message item: %+v", output)
+	}
+	usage := out["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(3) || usage["output_tokens"] != float64(2) {
+		t.Errorf("usage mismapped: %+v", usage)
+	}
+}
+
+func TestEndToEnd_Responses_Streaming(t *testing.T) {
+	dir := t.TempDir()
+	store := copilot.NewFileTokenStoreAt(filepath.Join(dir, "cfg"), filepath.Join(dir, "cache"))
+
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/copilot_internal/v2/token", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]any{"token": "cop_xyz", "expires_at": time.Now().Add(30 * time.Minute).Unix()})
+	})
+	cpMux := http.NewServeMux()
+	cpMux.HandleFunc("/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		f, _ := w.(http.Flusher)
+		writeSSE := func(payload string) {
+			_, _ = io.WriteString(w, "data: "+payload+"\n\n")
+			if f != nil {
+				f.Flush()
+			}
+		}
+		writeSSE(`{"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)
+		writeSSE(`{"id":"chatcmpl-s","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}`)
+		writeSSE(`{"id":"chatcmpl-s","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+		writeSSE(`{"id":"chatcmpl-s","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		writeSSE(`[DONE]`)
+	})
+
+	apiSrv := httptest.NewServer(apiMux)
+	cpSrv := httptest.NewServer(cpMux)
+	t.Cleanup(func() { apiSrv.Close(); cpSrv.Close() })
+
+	if err := store.SaveGitHubToken(&copilot.GitHubToken{AccessToken: "gho_test"}); err != nil {
+		t.Fatal(err)
+	}
+	block := buildBlock(t, fmt.Sprintf(`
+        models                = ["gpt-4o"]
+        api_base              = %q
+        github_api_base       = %q
+        request_timeout       = "5s"
+    `, cpSrv.URL, apiSrv.URL))
+	p, err := copilot.New(block, copilot.Options{TokenStore: store, IntervalUnit: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := p.Responses(context.Background(), backend.ResponsesRequest{
+		Model:  "gpt-4o",
+		Stream: true,
+		Body:   []byte(`{"model":"gpt-4o","input":"hi","stream":true}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+	wantSequence := []string{
+		"event: response.created",
+		"event: response.in_progress",
+		"event: response.output_item.added",
+		"event: response.content_part.added",
+		"event: response.output_text.delta",
+		"event: response.output_text.done",
+		"event: response.content_part.done",
+		"event: response.output_item.done",
+		"event: response.completed",
+	}
+	prev := 0
+	for _, want := range wantSequence {
+		idx := strings.Index(got[prev:], want)
+		if idx < 0 {
+			t.Fatalf("missing or out-of-order event %q. Stream:\n%s", want, got)
+		}
+		prev += idx + len(want)
+	}
+	// Final completed event should carry usage.
+	if !strings.Contains(got, `"input_tokens":1`) || !strings.Contains(got, `"output_tokens":1`) {
+		t.Errorf("usage not in completed event:\n%s", got)
 	}
 }

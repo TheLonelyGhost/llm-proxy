@@ -80,12 +80,18 @@ func newServeCmd(out io.Writer) *cobra.Command {
 			logger.Info("backends ready", "backends", reg.Names())
 
 			srv := server.New(server.Options{
-				Address:  cfg.Server.Address,
-				Port:     cfg.Server.Port,
-				Registry: reg,
-				Logger:   logger,
-				Tracer:   telemetry.Tracer("server"),
+				Address:   cfg.Server.Address,
+				Port:      cfg.Server.Port,
+				Registry:  reg,
+				Logger:    logger,
+				Tracer:    telemetry.Tracer("server"),
+				LogBodies: cfg.Server.LogBodies,
 			})
+
+			if cfg.Server.LogBodies {
+				logger.Warn("request/response body logging is enabled; treat the log stream as a secret",
+					"setting", "server.log_bodies")
+			}
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()

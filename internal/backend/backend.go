@@ -11,6 +11,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -123,15 +124,22 @@ type EmbeddingRequest struct {
 
 // Reasoning holds optional reasoning parameters for /v1/responses requests.
 type Reasoning struct {
-	// Effort specifies the reasoning effort level: "low", "medium", or "high".
+	// Effort specifies the reasoning effort level. The proxy validates against
+	// OpenAI's published set ("minimal", "low", "medium", "high") before
+	// dispatching to a backend.
 	Effort string
 }
 
 // ResponsesRequest is the decoded /v1/responses request.
+//
+// Input carries the original JSON value of the `input` field, byte-exact from
+// the client. Per OpenAI's Responses API it is either a JSON string or a JSON
+// array of input items; the server validates the shape before populating this
+// field. Backends that simply forward Body upstream can ignore Input.
 type ResponsesRequest struct {
 	Model     string
 	Stream    bool
-	Input     string
+	Input     json.RawMessage
 	Reasoning *Reasoning // Optional reasoning parameters
 	Body      []byte
 }

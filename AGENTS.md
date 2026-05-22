@@ -83,7 +83,13 @@ To add a new backend:
 
 - Code is formatted with `gofmt -s` and `goimports`.
 - Public symbols carry doc comments starting with the symbol name.
-- Logging uses `log/slog`. Never log request/response bodies or token values.
+- Logging uses `log/slog`. Never log request/response bodies or token values
+  by default. The single sanctioned exception is the `server.log_bodies`
+  carve-out (see `docs/configuration.md`): when both `log_bodies = true` and
+  `--log-level debug` are set, the access logger emits request and
+  non-streaming response bodies at DEBUG. Any new code that adds body or
+  secret logging must gate behind that same flag + level check and be
+  documented in `docs/configuration.md`.
 - Errors are wrapped with `%w`; sentinel errors live next to the type or in
   the package that produces them (e.g., `backend.ErrUnsupported`).
 

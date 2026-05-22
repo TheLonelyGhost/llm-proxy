@@ -110,6 +110,56 @@ For each API call the proxy sets:
 
 The client's `Authorization` header is _not_ forwarded.
 
+## Responses API shim (`/v1/responses`)
+
+GitHub Copilot's upstream does not expose `/v1/responses`. The provider
+implements the endpoint as an in-proxy translation shim over
+`/chat/completions`, so OpenAI Responses-API clients (including OpenCode's
+default integration) work against `copilot/<model>` without code changes.
+
+**Supported subset:**
+
+- `input` as either a string or an array of input items
+  (`{role, content:[{type:"input_text"|"input_image", ...}]}`).
+- `instructions` (top-level) is prepended as a `system` message.
+- `tools` of `{type:"function", name, description, parameters}`; `tool_choice`.
+- `temperature`, `top_p`, `max_output_tokens` (→ `max_tokens`), `metadata`,
+  `parallel_tool_calls`, `user`.
+- `stream: true` — translated chunk-by-chunk into the OpenAI named-event
+  sequence (`response.created` → `response.in_progress` →
+  `response.output_item.added` → `response.content_part.added` →
+  `response.output_text.delta`* → `response.output_text.done` →
+  `response.content_part.done` → `response.output_item.done` →
+  `response.completed`). Function-call deltas emit
+  `response.function_call_arguments.{delta,done}` between
+  `response.output_item.{added,done}`.
+- `reasoning.effort` — forwarded verbatim; Copilot models that don't reason
+  ignore it.
+
+**Round-trip of function tools:**
+
+The shim flattens upstream `tool_calls` into Responses `output[]` items of
+type `function_call`, preserving `call_id`, `name`, and arguments. Clients
+should feed the tool result back as an input item of type
+`function_call_output` (`{type, call_id, output}`); the shim converts it
+into a chat `{role:"tool", tool_call_id, content}` message on the next turn.
+
+**Not supported (explicit non-goals):**
+
+- Built-in tools (`web_search`, `image_generation`, `code_interpreter`,
+  file search). Copilot's chat surface does not accept them; they are
+  silently dropped from the request.
+- `previous_response_id`, `store: true`, response retrieval / deletion
+  (`GET /v1/responses/{id}`). The proxy is stateless; clients must carry
+  their own history on each `input` array.
+- Encrypted content / multi-deployment affinity.
+
+**IDs:**
+
+The `id` field on every emitted response is `resp_<chatcmpl-id>` where
+`<chatcmpl-id>` comes from the upstream chat completion. These ids are
+informational only and cannot be retrieved.
+
 ## Budget / premium-request reporting
 
 GitHub Copilot Pro / Pro+ / Business / Enterprise plans meter "premium

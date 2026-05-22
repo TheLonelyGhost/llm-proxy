@@ -30,6 +30,10 @@ server {
   trace_sampler  = "always_on"
   trace_ratio    = 1.0
   trace_service  = "llm-proxy"
+
+  # Optional DEBUG-level body logging. Default false.
+  # SECURITY: see "Body logging (DEBUG)" below before enabling.
+  log_bodies = false
 }
 
 backend "<prefix>" {      # routing prefix; lowercase, no slashes
@@ -68,6 +72,31 @@ Sampling modes:
 - `parent_based_ratio`
 
 `trace_ratio` applies only to ratio-based samplers.
+
+## Body logging (DEBUG)
+
+`server.log_bodies` (default `false`) toggles a DEBUG-level diagnostic log
+line that includes the HTTP request body received by the proxy and the
+response body sent back to the client.
+
+Behavior:
+
+- Both `server.log_bodies = true` **and** `--log-level debug` must be set;
+  either alone is a no-op.
+- Bodies are capped at 64 KiB; larger bodies are truncated and the log entry
+  carries `request_body_truncated=true` / `response_body_truncated=true`.
+- **Streaming responses are never captured.** When the response is streamed
+  (e.g. `stream: true` on `/v1/chat/completions` or `/v1/responses`), the log
+  records `response_body=<streaming: not captured>` so SSE is not buffered.
+- At startup the proxy emits a `WARN`-level line whenever this flag is on, to
+  make accidental enablement visible.
+
+> **Security.** Request and response bodies routinely contain prompts, chat
+> history, tool output, embedding inputs, and sometimes credentials that
+> clients accidentally embed in prompts. With `log_bodies = true`, the proxy's
+> log stream MUST be treated as a secret: protect it with the same controls
+> you use for the upstream API keys themselves. Do not enable this flag in
+> production unless you have a concrete, time-bounded debugging need.
 
 ## env() interpolation
 
@@ -202,9 +231,25 @@ The `token_limits` object contains:
 
 For models with the `reasoning` capability, `reasoning_effort_levels` lists
 supported effort values for the `/v1/responses` endpoint:
+- `minimal`: Minimal reasoning, fastest response (GPT-5 family)
 - `low`: Faster response with less reasoning depth
 - `medium`: Balanced response time and reasoning quality
 - `high`: Slower response with deeper reasoning
+
+The proxy validates `reasoning.effort` against this set and returns HTTP 400
+`invalid_request_error` for any other value.
+
+**`/v1/responses` request body:**
+
+The `input` field accepts both shapes defined by OpenAI's Responses API:
+
+- a plain JSON string, or
+- a JSON array of input items (objects shaped like
+  `{"role": "user", "content": [{"type": "input_text", "text": "..."}]}`).
+
+The proxy validates only presence and outer kind; deeper schema validation is
+left to the upstream backend. Other top-level fields (`instructions`, `tools`,
+`tool_choice`, `temperature`, etc.) are forwarded verbatim.
 
 Note: Capabilities vary by backend. For example, `copilot/gpt-4o` may have
 different capabilities than `openai/gpt-4o` even though they serve the same

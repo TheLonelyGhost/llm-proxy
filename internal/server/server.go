@@ -37,10 +37,11 @@ import (
 
 // Server is the proxy HTTP server.
 type Server struct {
-	addr     string
-	registry *backend.Registry
-	logger   *slog.Logger
-	tracer   trace.Tracer
+	addr      string
+	registry  *backend.Registry
+	logger    *slog.Logger
+	tracer    trace.Tracer
+	logBodies bool
 
 	httpServer *http.Server
 }
@@ -56,6 +57,12 @@ type Options struct {
 	ReadHeaderTimeout time.Duration
 	// IdleTimeout caps idle keep-alive connections.
 	IdleTimeout time.Duration
+	// LogBodies, when true, causes the access logger to emit request and
+	// (non-streaming) response bodies at DEBUG level, capped at
+	// maxLoggedBodyBytes. SECURITY: bodies routinely contain prompts, chat
+	// history, and tool output; operators enabling this MUST treat the proxy's
+	// log stream as a secret. Streaming response bodies are never logged.
+	LogBodies bool
 }
 
 // New constructs a Server. The HTTP listener is not started until Run is
@@ -76,10 +83,11 @@ func New(opts Options) *Server {
 	}
 	addr := net.JoinHostPort(opts.Address, strconv.Itoa(opts.Port))
 	s := &Server{
-		addr:     addr,
-		registry: opts.Registry,
-		logger:   logger,
-		tracer:   opts.Tracer,
+		addr:      addr,
+		registry:  opts.Registry,
+		logger:    logger,
+		tracer:    opts.Tracer,
+		logBodies: opts.LogBodies,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -93,7 +101,7 @@ func New(opts Options) *Server {
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           withLogging(logger, s.tracer, mux),
+		Handler:           withLogging(logger, s.tracer, s.logBodies, mux),
 		ReadHeaderTimeout: opts.ReadHeaderTimeout,
 		IdleTimeout:       opts.IdleTimeout,
 	}
@@ -167,12 +175,32 @@ func writeAPIError(w http.ResponseWriter, status int, kind, msg string) {
 	writeJSON(w, status, apiError{Error: apiErrorBody{Message: msg, Type: kind}})
 }
 
-// withLogging emits a structured access log line per request.
-func withLogging(logger *slog.Logger, tracer trace.Tracer, next http.Handler) http.Handler {
+// maxLoggedBodyBytes caps how many bytes of a request or response body the
+// access log will emit when LogBodies is enabled. Bodies larger than this are
+// truncated and the log entry is annotated with body_truncated=true.
+const maxLoggedBodyBytes = 64 << 10 // 64 KiB
+
+// loggedBodyContextKey is the context key under which handlers stash the
+// captured (pre-rewrite) request body for the access logger.
+type loggedBodyContextKey struct{}
+
+// withLogging emits a structured access log line per request. When logBodies
+// is true and the configured slog level is DEBUG, it also logs request and
+// (non-streaming) response bodies, capped at maxLoggedBodyBytes.
+//
+// SECURITY: when logBodies is true, the proxy's log stream contains
+// user-submitted prompts and upstream completions. Operators are responsible
+// for protecting that stream as a secret.
+func withLogging(logger *slog.Logger, tracer trace.Tracer, logBodies bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rw := &statusRecorder{ResponseWriter: w, status: 200}
+		captureBody := logBodies && logger.Enabled(r.Context(), slog.LevelDebug)
+
+		rw := &statusRecorder{ResponseWriter: w, status: 200, capture: captureBody}
 		ctx, span := tracer.Start(r.Context(), "http.request")
+		if captureBody {
+			ctx = context.WithValue(ctx, loggedBodyContextKey{}, &loggedRequestBody{})
+		}
 		r = r.WithContext(ctx)
 		next.ServeHTTP(rw, r)
 		span.SetAttributes(
@@ -192,13 +220,69 @@ func withLogging(logger *slog.Logger, tracer trace.Tracer, next http.Handler) ht
 			"duration_ms", time.Since(start).Milliseconds(),
 			"remote", r.RemoteAddr,
 		)
+		if captureBody {
+			emitBodyDebugLog(r.Context(), logger, r, rw)
+		}
 	})
+}
+
+// loggedRequestBody is populated by readBody when body logging is active.
+type loggedRequestBody struct {
+	bytes     []byte
+	truncated bool
+}
+
+// recordRequestBody stashes a copy of the (potentially truncated) request
+// body on the request context for emitBodyDebugLog. Called by readBody when
+// body logging is enabled. A nil context value is a no-op.
+func recordRequestBody(ctx context.Context, body []byte) {
+	v, _ := ctx.Value(loggedBodyContextKey{}).(*loggedRequestBody)
+	if v == nil {
+		return
+	}
+	if len(body) <= maxLoggedBodyBytes {
+		v.bytes = append(v.bytes[:0], body...)
+		return
+	}
+	v.bytes = append(v.bytes[:0], body[:maxLoggedBodyBytes]...)
+	v.truncated = true
+}
+
+func emitBodyDebugLog(ctx context.Context, logger *slog.Logger, r *http.Request, rw *statusRecorder) {
+	attrs := []any{
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", rw.status,
+	}
+	if v, _ := ctx.Value(loggedBodyContextKey{}).(*loggedRequestBody); v != nil {
+		attrs = append(attrs,
+			"request_body", string(v.bytes),
+			"request_body_truncated", v.truncated,
+		)
+	}
+	if rw.streaming {
+		attrs = append(attrs, "response_body", "<streaming: not captured>")
+	} else {
+		attrs = append(attrs,
+			"response_body", string(rw.captured),
+			"response_body_truncated", rw.captureTruncated,
+		)
+	}
+	logger.Debug("request bodies", attrs...)
 }
 
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
 	wroteHeader bool
+
+	// capture, captured, captureTruncated control optional body capture for
+	// the DEBUG body-logging carve-out. Streaming responses set streaming=true
+	// to suppress capture (we never buffer SSE traffic).
+	capture          bool
+	streaming        bool
+	captured         []byte
+	captureTruncated bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
@@ -207,6 +291,24 @@ func (r *statusRecorder) WriteHeader(code int) {
 		r.wroteHeader = true
 	}
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Write captures up to maxLoggedBodyBytes of the response body when body
+// logging is enabled and the response is not streaming.
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if r.capture && !r.streaming {
+		remaining := maxLoggedBodyBytes - len(r.captured)
+		switch {
+		case remaining <= 0:
+			r.captureTruncated = true
+		case len(p) <= remaining:
+			r.captured = append(r.captured, p...)
+		default:
+			r.captured = append(r.captured, p[:remaining]...)
+			r.captureTruncated = true
+		}
+	}
+	return r.ResponseWriter.Write(p)
 }
 
 // Flush forwards to the underlying writer if it supports flushing, so SSE
@@ -224,6 +326,9 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter 
 // boundaries so streaming completions reach the client promptly.
 func copyBody(w http.ResponseWriter, body io.ReadCloser, stream bool) {
 	defer func() { _ = body.Close() }()
+	if sr, ok := w.(*statusRecorder); ok && stream {
+		sr.streaming = true
+	}
 	if stream {
 		flusher, _ := w.(http.Flusher)
 		buf := make([]byte, 4096)

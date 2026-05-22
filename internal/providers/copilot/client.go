@@ -15,6 +15,11 @@ import (
 // forward dispatches an upstream HTTP request to Copilot, refreshing the
 // token once on a 401. The returned Response.Body is owned by the caller and
 // must be closed.
+//
+// All current callers pass http.MethodPost; the method parameter is retained
+// to keep the helper general for future endpoints.
+//
+//nolint:unparam // method retained for future non-POST callers
 func (p *Provider) forward(ctx context.Context, method, path string, body []byte, _ bool) (*backend.Response, error) {
 	ctx, span := p.tracer.Start(ctx, "copilot.forward")
 	defer span.End()

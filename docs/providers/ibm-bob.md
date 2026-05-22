@@ -123,10 +123,35 @@ backend "bob" {
 | Capability        | Path on modern backend             | Path on legacy backend |
 | ----------------- | ---------------------------------- | ---------------------- |
 | Chat completions  | `/inference/v1/chat/completions`   | `/chat/completions`    |
+| Responses (shim)  | `/inference/v1/chat/completions`   | `/chat/completions`    |
 | Embeddings        | `/embeddings`                      | `/embeddings`          |
 | Completions       | _not exposed_                      | `/v1/completions`      |
 | Profile lookup    | `/admin/v1/profile`                | _not used_             |
 | Model catalogue   | `/inference/v1/model/info`         | `/v1/model/info`       |
+
+## Responses API shim (`/v1/responses`)
+
+The IBM Bob upstream's native `/v1/responses` route is unreliable across
+deployments. The proxy implements `/v1/responses` for `bob/<model>` as an
+in-proxy translation shim over `/chat/completions`, identical in behaviour
+to the shim described in the [GitHub Copilot provider](./github-copilot.md#responses-api-shim-v1responses).
+
+Bob-specific details:
+
+- The translated chat-completions request is dispatched through Bob's
+  normal `forward` path, so Authorization headers, HMAC signing on the
+  modern backend (`x-request-timestamp`, `x-request-signature`), identity
+  propagation (`x-instance-id`, `x-team-id`), and retry behaviour all apply
+  identically to a direct `/v1/chat/completions` call.
+- Allow-list and identity bootstrap (`/admin/v1/profile`) run **before**
+  the request is translated; a disallowed model or a failed profile lookup
+  short-circuits with the appropriate error.
+- The shared translator (under `internal/responsesshim`) is the same code
+  the Copilot provider uses, so the supported subset and explicit
+  non-goals — no `previous_response_id`, no built-in tools, no
+  retrieval — are identical.
+
+
 
 For each call the proxy sets:
 

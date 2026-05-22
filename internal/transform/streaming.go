@@ -152,11 +152,145 @@ func TransformStreamingCompletionResponse(body io.ReadCloser, modelPrefix string
 }
 
 // TransformStreamingResponsesResponse creates an SSE stream transformer for
-// responses endpoint chunks with reasoning deltas, setting the object type to "response.chunk".
+// OpenAI /v1/responses events. Unlike the chat-completions stream (single
+// `data:` lines whose payload has top-level `model`/`object`), the Responses
+// stream is a sequence of NAMED SSE events of the form:
+//
+//	event: response.created
+//	data: {"type":"response.created","response":{...}}
+//
+//	event: response.output_text.delta
+//	data: {"type":"response.output_text.delta","delta":"H",...}
+//
+// The transformer preserves the `event:` lines and the `data:` JSON payload
+// structure verbatim, only rewriting `response.model` (when present) to the
+// backend-prefixed form so clients see the same model id they requested.
+// `data: [DONE]` sentinels and SSE comment lines (`:keep-alive`) pass through
+// unchanged.
 func TransformStreamingResponsesResponse(body io.ReadCloser, modelPrefix string) io.ReadCloser {
-	transformer := NewStreamTransformer(body, modelPrefix, "response.chunk")
+	transformer := newResponsesStreamTransformer(body, modelPrefix)
 	return &streamingReader{
 		transformer:  transformer,
 		originalBody: body,
 	}
 }
+
+// responsesStreamTransformer is an SSE reader specialised for OpenAI's
+// /v1/responses event format. See TransformStreamingResponsesResponse.
+type responsesStreamTransformer struct {
+	modelPrefix string
+	scanner     *bufio.Scanner
+}
+
+func newResponsesStreamTransformer(body io.ReadCloser, modelPrefix string) *responsesStreamTransformer {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 4096), maxSSEEventSize)
+	scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		if atEOF && len(data) == 0 {
+			return 0, nil, nil
+		}
+		if i := bytes.Index(data, []byte("\n\n")); i >= 0 {
+			return i + 2, data[0:i], nil
+		}
+		if i := bytes.Index(data, []byte("\r\n\r\n")); i >= 0 {
+			return i + 4, data[0:i], nil
+		}
+		if atEOF {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
+	})
+	return &responsesStreamTransformer{modelPrefix: modelPrefix, scanner: scanner}
+}
+
+func (rt *responsesStreamTransformer) Read(p []byte) (int, error) {
+	if !rt.scanner.Scan() {
+		if err := rt.scanner.Err(); err != nil {
+			return 0, err
+		}
+		return 0, io.EOF
+	}
+
+	block := rt.scanner.Text()
+	if block == "" {
+		// Empty block (e.g. trailing blank lines) — skip and try the next.
+		return rt.Read(p)
+	}
+
+	// SSE comment line — pass through verbatim.
+	if strings.HasPrefix(block, ":") {
+		return rt.write(p, block+"\n\n")
+	}
+
+	var eventLine string
+	var dataPayload string
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "event:"):
+			eventLine = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			// SSE permits a single space after the colon.
+			payload := strings.TrimPrefix(line, "data:")
+			payload = strings.TrimPrefix(payload, " ")
+			if dataPayload == "" {
+				dataPayload = payload
+			} else {
+				// Multi-line `data:` continuation: SSE concatenates with \n.
+				dataPayload += "\n" + payload
+			}
+		}
+	}
+
+	// No data field at all — pass the block through verbatim (best-effort).
+	if dataPayload == "" {
+		return rt.write(p, block+"\n\n")
+	}
+
+	// [DONE] sentinel passes through unchanged.
+	if strings.TrimSpace(dataPayload) == "[DONE]" {
+		out := "data: [DONE]\n\n"
+		if eventLine != "" {
+			out = "event: " + eventLine + "\n" + out
+		}
+		return rt.write(p, out)
+	}
+
+	// Try to JSON-parse the data; if it parses, rewrite `response.model`.
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(dataPayload), &raw); err != nil {
+		// Malformed payload — forward as-is so we don't silently drop it.
+		return rt.write(p, block+"\n\n")
+	}
+
+	if resp, ok := raw["response"].(map[string]any); ok {
+		if _, hasModel := resp["model"]; hasModel {
+			resp["model"] = rt.modelPrefix
+		}
+	}
+
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return rt.write(p, block+"\n\n")
+	}
+
+	var out strings.Builder
+	if eventLine != "" {
+		out.WriteString("event: ")
+		out.WriteString(eventLine)
+		out.WriteByte('\n')
+	}
+	out.WriteString("data: ")
+	out.Write(encoded)
+	out.WriteString("\n\n")
+	return rt.write(p, out.String())
+}
+
+func (rt *responsesStreamTransformer) write(p []byte, s string) (int, error) {
+	if len(s) > len(p) {
+		return 0, fmt.Errorf("buffer too small for SSE block (%d bytes)", len(s))
+	}
+	return copy(p, s), nil
+}
+
+func (rt *responsesStreamTransformer) Close() error { return nil }

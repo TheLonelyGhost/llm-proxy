@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -276,6 +277,7 @@ func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool)
 		writeAPIError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", err.Error())
 		return nil, false
 	}
+	recordRequestBody(r.Context(), body)
 	return body, true
 }
 
@@ -314,9 +316,9 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Model     string `json:"model"`
-		Input     string `json:"input"`
-		Stream    bool   `json:"stream,omitempty"`
+		Model     string          `json:"model"`
+		Input     json.RawMessage `json:"input"`
+		Stream    bool            `json:"stream,omitempty"`
 		Reasoning *struct {
 			Effort string `json:"effort"`
 		} `json:"reasoning,omitempty"`
@@ -327,8 +329,8 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Input == "" {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "request missing required field \"input\"")
+	if err := validateResponsesInput(req.Input); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
 
@@ -338,9 +340,9 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		validEfforts := map[string]bool{"low": true, "medium": true, "high": true}
+		validEfforts := map[string]bool{"minimal": true, "low": true, "medium": true, "high": true}
 		if !validEfforts[req.Reasoning.Effort] {
-			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "reasoning.effort must be \"low\", \"medium\", or \"high\"")
+			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "reasoning.effort must be one of \"minimal\", \"low\", \"medium\", or \"high\"")
 			return
 		}
 	}
@@ -378,6 +380,42 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	})
 
 	s.writeUpstreamResponse(w, resp, err, req.Stream, endpointResponses, router.Format(b.Name(), route.Model))
+}
+
+// validateResponsesInput enforces the OpenAI /v1/responses `input` contract:
+// the field must be present and either a JSON string or a JSON array whose
+// elements are JSON objects. Returns a client-facing error message on failure.
+func validateResponsesInput(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return errors.New("request missing required field \"input\"")
+	}
+
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return errors.New("\"input\" must be a string or an array of input items")
+		}
+		if s == "" {
+			return errors.New("request missing required field \"input\"")
+		}
+		return nil
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return errors.New("\"input\" must be a string or an array of input items")
+		}
+		for _, item := range items {
+			t := bytes.TrimSpace(item)
+			if len(t) == 0 || t[0] != '{' {
+				return errors.New("\"input\" array elements must be input-item objects")
+			}
+		}
+		return nil
+	default:
+		return errors.New("\"input\" must be a string or an array of input items")
+	}
 }
 
 func (s *Server) handleModelRequest(

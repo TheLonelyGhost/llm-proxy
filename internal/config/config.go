@@ -37,6 +37,12 @@ type ServerBlock struct {
 	TraceSampler  string  `hcl:"trace_sampler,optional"`
 	TraceRatio    float64 `hcl:"trace_ratio,optional"`
 	TraceService  string  `hcl:"trace_service,optional"`
+	// LogBodies enables DEBUG-level logging of request and non-streaming
+	// response bodies. SECURITY: bodies routinely contain prompts, chat
+	// history, tool output, and (when clients are misconfigured) API keys or
+	// PII. Default is false. Operators who flip this on MUST treat the proxy's
+	// log stream as a secret. Streaming response bodies are never logged.
+	LogBodies bool `hcl:"log_bodies,optional"`
 }
 
 // BackendBlock is a generic provider configuration. The block label is the

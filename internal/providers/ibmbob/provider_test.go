@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -128,6 +129,15 @@ type fakeBackend struct {
 	embedResp      string
 	completionResp string
 	profileResp    string
+
+	// chatBody and chatPath capture the most recent /chat/completions call,
+	// so tests can verify request translation.
+	chatPath string
+	chatBody []byte
+
+	// chatHandlerOverride lets a test substitute its own handler (e.g. to
+	// emit SSE chunks for streaming tests).
+	chatHandlerOverride http.HandlerFunc
 
 	chatStatus    int
 	failChatTimes int
@@ -432,6 +442,199 @@ func TestComplete_UnsupportedOnAuthnBackend(t *testing.T) {
 	}
 }
 
+func TestResponses_AuthnBackend_NonStreaming(t *testing.T) {
+	fb := &fakeBackend{t: t, expectSign: true, expectInstance: "inst-1", expectTeam: "team-1"}
+	fb.hmacSecret = []byte("topsecret")
+	fb.chatResp = `{
+		"id":"chatcmpl-bob-1","object":"chat.completion","created":1700000000,
+		"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}
+	}`
+	fb.profileResp = `{"instances":[{"instance_id":"inst-1","teams":[{"id":"team-1"}]}]}`
+	srv := startFake(t, fb)
+
+	block := buildBlock(t, fmt.Sprintf(`
+        api_key      = "%s"
+        hmac_secret  = "topsecret"
+        api_base     = "%s"
+        models       = ["premium"]
+    `, makeJWTKey(), srv.URL))
+	p, err := ibmbob.New(block, ibmbob.Options{Now: fixedNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := p.Responses(context.Background(), backend.ResponsesRequest{
+		Model: "premium",
+		Body:  []byte(`{"model":"premium","input":"hi","max_output_tokens":32}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if fb.chatPath != "/inference/v1/chat/completions" {
+		t.Errorf("upstream path = %q, want /inference/v1/chat/completions", fb.chatPath)
+	}
+
+	// Upstream got a chat-completions body, not a responses body.
+	var upstream map[string]any
+	if err := json.Unmarshal(fb.chatBody, &upstream); err != nil {
+		t.Fatal(err)
+	}
+	if _, isResponses := upstream["input"]; isResponses {
+		t.Errorf("upstream received an `input` field; shim did not translate body: %s", fb.chatBody)
+	}
+	if upstream["max_tokens"] != float64(32) {
+		t.Errorf("max_tokens not forwarded: %+v", upstream)
+	}
+	msgs := upstream["messages"].([]any)
+	if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "hi" {
+		t.Errorf("messages bad: %+v", msgs)
+	}
+
+	// Client receives Responses-shaped JSON.
+	body, _ := io.ReadAll(resp.Body)
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("client body: %v", err)
+	}
+	if out["object"] != "response" || out["status"] != "completed" {
+		t.Errorf("response envelope: %+v", out)
+	}
+	if out["model"] != "bob/premium" {
+		t.Errorf("model not prefixed: %v", out["model"])
+	}
+	output := out["output"].([]any)
+	if len(output) != 1 {
+		t.Fatalf("output len = %d", len(output))
+	}
+}
+
+func TestResponses_LegacyBackend_NonStreaming(t *testing.T) {
+	fb := &fakeBackend{t: t, expectSign: false}
+	fb.chatResp = `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}`
+	srv := startFake(t, fb)
+
+	block := buildBlock(t, fmt.Sprintf(`
+        api_key  = "sk-test"
+        api_base = "%s"
+        models   = ["premium"]
+    `, srv.URL))
+	p, err := ibmbob.New(block, ibmbob.Options{Now: fixedNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := p.Responses(context.Background(), backend.ResponsesRequest{
+		Model: "premium",
+		Body:  []byte(`{"model":"premium","input":"hi"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if fb.chatPath != "/chat/completions" {
+		t.Errorf("path = %q, want /chat/completions", fb.chatPath)
+	}
+	if atomic.LoadInt32(&fb.profileCalls) != 0 {
+		t.Errorf("legacy key should not fetch profile, got %d", fb.profileCalls)
+	}
+}
+
+func TestResponses_AuthnBackend_Streaming(t *testing.T) {
+	fb := &fakeBackend{t: t, expectSign: true, expectInstance: "inst-1", expectTeam: "team-1"}
+	fb.hmacSecret = []byte("topsecret")
+	fb.profileResp = `{"instances":[{"instance_id":"inst-1","teams":[{"id":"team-1"}]}]}`
+	fb.chatHandlerOverride = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f, _ := w.(http.Flusher)
+		write := func(payload string) {
+			io.WriteString(w, "data: "+payload+"\n\n") //nolint:errcheck
+			if f != nil {
+				f.Flush()
+			}
+		}
+		write(`{"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`)
+		write(`{"id":"chatcmpl-s","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}`)
+		write(`{"id":"chatcmpl-s","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+		write(`{"id":"chatcmpl-s","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		write(`[DONE]`)
+	}
+	srv := startFake(t, fb)
+
+	block := buildBlock(t, fmt.Sprintf(`
+        api_key      = "%s"
+        hmac_secret  = "topsecret"
+        api_base     = "%s"
+        models       = ["premium"]
+    `, makeJWTKey(), srv.URL))
+	p, err := ibmbob.New(block, ibmbob.Options{Now: fixedNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := p.Responses(context.Background(), backend.ResponsesRequest{
+		Model:  "premium",
+		Stream: true,
+		Body:   []byte(`{"model":"premium","input":"hi","stream":true}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	if fb.chatPath != "/inference/v1/chat/completions" {
+		t.Errorf("upstream path = %q", fb.chatPath)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+	wantOrder := []string{
+		"event: response.created",
+		"event: response.in_progress",
+		"event: response.output_item.added",
+		"event: response.content_part.added",
+		"event: response.output_text.delta",
+		"event: response.output_text.done",
+		"event: response.content_part.done",
+		"event: response.output_item.done",
+		"event: response.completed",
+	}
+	cursor := 0
+	for _, want := range wantOrder {
+		idx := strings.Index(got[cursor:], want)
+		if idx < 0 {
+			t.Fatalf("missing or out-of-order event %q. Stream:\n%s", want, got)
+		}
+		cursor += idx + len(want)
+	}
+	if !strings.Contains(got, `"input_tokens":1`) || !strings.Contains(got, `"output_tokens":1`) {
+		t.Errorf("usage not in completed event:\n%s", got)
+	}
+}
+
+func TestResponses_AllowListEnforced(t *testing.T) {
+	block := buildBlock(t, `api_key = "sk-x"
+  models = ["premium"]`)
+	p, err := ibmbob.New(block, ibmbob.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.Responses(context.Background(), backend.ResponsesRequest{Model: "other"})
+	if resp != nil {
+		t.Errorf("expected nil response, got %+v", resp)
+	}
+	if !errors.Is(err, backend.ErrUnknownModel) {
+		t.Fatalf("expected ErrUnknownModel, got %v", err)
+	}
+}
+
 func TestModels(t *testing.T) {
 	block := buildBlock(t, `api_key = "sk-x"
   models = ["a","b"]`)
@@ -497,6 +700,15 @@ func (f *fakeBackend) handleChat(w http.ResponseWriter, r *http.Request) {
 	count := atomic.AddInt32(&f.chatCalls, 1)
 	if f.failChatTimes > 0 && int32(f.failChatTimes) >= count {
 		http.Error(w, "boom", http.StatusBadGateway)
+		return
+	}
+	f.chatPath = r.URL.Path
+	if r.Body != nil {
+		body, _ := io.ReadAll(r.Body)
+		f.chatBody = body
+	}
+	if f.chatHandlerOverride != nil {
+		f.chatHandlerOverride(w, r)
 		return
 	}
 	status := f.chatStatus

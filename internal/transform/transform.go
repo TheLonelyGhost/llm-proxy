@@ -284,6 +284,25 @@ func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool,
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned invalid JSON")
 	}
+	if raw == nil {
+		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned empty JSON object")
+	}
+
+	// Pass-through path: backend already produced a real Responses-shaped
+	// body (top-level `output` array, per OpenAI Responses API). Rewrite
+	// `model` and re-encode without further reshaping.
+	if _, hasOutput := raw["output"].([]any); hasOutput {
+		raw["model"] = modelPrefix
+		out, err := json.Marshal(raw)
+		if err != nil {
+			return errorResponse(http.StatusInternalServerError, "internal_error", "failed to re-encode response")
+		}
+		return &TransformResult{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(out)),
+		}, nil
+	}
 
 	choices, ok := raw["choices"]
 	if !ok {

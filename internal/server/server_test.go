@@ -1,10 +1,13 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -589,6 +592,84 @@ func TestHandleResponses_MissingInput(t *testing.T) {
 	}
 }
 
+func TestHandleResponses_ArrayInput(t *testing.T) {
+	b := newFakeBackend("openai", []string{"o1-preview"})
+	b.respond = okResponse(`{"id":"resp-1","object":"response","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	baseURL := startServer(t, b)
+
+	const arrayInput = `[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]`
+	reqBody := `{"model":"openai/o1-preview","input":` + arrayInput + `}`
+	resp, err := http.Post(baseURL+"/v1/responses", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	captured := b.get("responses")
+	if captured == nil {
+		t.Fatal("backend did not receive request")
+	}
+
+	var capturedReq map[string]json.RawMessage
+	if err := json.Unmarshal(captured, &capturedReq); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compare semantically (json.Marshal of map[string]any may reorder keys).
+	var gotItems, wantItems []map[string]any
+	if err := json.Unmarshal(capturedReq["input"], &gotItems); err != nil {
+		t.Fatalf("forwarded input is not an array of objects: %v (raw=%s)", err, capturedReq["input"])
+	}
+	if err := json.Unmarshal([]byte(arrayInput), &wantItems); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%v", gotItems) != fmt.Sprintf("%v", wantItems) {
+		t.Errorf("input array not forwarded:\n got=%v\nwant=%v", gotItems, wantItems)
+	}
+}
+
+func TestHandleResponses_RejectsWrongKindInput(t *testing.T) {
+	b := newFakeBackend("openai", []string{"o1"})
+	baseURL := startServer(t, b)
+
+	cases := []struct {
+		name    string
+		reqBody string
+	}{
+		{"null", `{"model":"openai/o1","input":null}`},
+		{"empty string", `{"model":"openai/o1","input":""}`},
+		{"number", `{"model":"openai/o1","input":42}`},
+		{"bool", `{"model":"openai/o1","input":true}`},
+		{"object", `{"model":"openai/o1","input":{"role":"user"}}`},
+		{"array of non-objects", `{"model":"openai/o1","input":[1,2,3]}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := http.Post(baseURL+"/v1/responses", "application/json", strings.NewReader(tc.reqBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp == nil {
+				t.Fatal("nil response")
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("expected 400, got %d, body=%s", resp.StatusCode, body)
+			}
+		})
+	}
+}
+
 func TestHandleResponses_InvalidReasoningEffort(t *testing.T) {
 	b := newFakeBackend("openai", []string{"o1"})
 	baseURL := startServer(t, b)
@@ -611,6 +692,11 @@ func TestHandleResponses_InvalidReasoningEffort(t *testing.T) {
 		{
 			name:      "valid high",
 			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"high"}}`,
+			shouldErr: false,
+		},
+		{
+			name:      "valid minimal",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"minimal"}}`,
 			shouldErr: false,
 		},
 		{
@@ -1025,5 +1111,140 @@ func TestTransformNonConformantBackendResponses(t *testing.T) {
 				t.Error("expected error object in response")
 			}
 		})
+	}
+}
+
+// --- Body logging carve-out tests ---
+
+func startServerWithLogging(t *testing.T, b *fakeBackend, logBodies bool, level slog.Level) (string, *bytes.Buffer) {
+	t.Helper()
+	reg := backend.NewRegistry()
+	if err := reg.Register(b); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level}))
+	srv := server.New(server.Options{
+		Address: "127.0.0.1", Port: 0,
+		Registry:  reg,
+		Logger:    logger,
+		LogBodies: logBodies,
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return "http://" + ln.Addr().String(), &buf
+}
+
+func TestBodyLogging_OffByDefault(t *testing.T) {
+	b := newFakeBackend("copilot", []string{"gpt-4o"})
+	b.respond = okResponse(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"created":1}`)
+	baseURL, logs := startServerWithLogging(t, b, false, slog.LevelDebug)
+
+	const reqBody = `{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"secret prompt"}]}`
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+
+	out := logs.String()
+	if strings.Contains(out, "secret prompt") {
+		t.Errorf("logs leaked request body when LogBodies=false:\n%s", out)
+	}
+	if strings.Contains(out, "request bodies") {
+		t.Errorf("body log line emitted when LogBodies=false:\n%s", out)
+	}
+}
+
+func TestBodyLogging_OnAtDebug_LogsRequestAndResponse(t *testing.T) {
+	b := newFakeBackend("copilot", []string{"gpt-4o"})
+	const respBody = `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi-from-upstream"},"finish_reason":"stop"}],"created":1}`
+	b.respond = okResponse(respBody)
+	baseURL, logs := startServerWithLogging(t, b, true, slog.LevelDebug)
+
+	const reqBody = `{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"prompt-from-client"}]}`
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+
+	out := logs.String()
+	if !strings.Contains(out, "prompt-from-client") {
+		t.Errorf("expected request body in logs, got:\n%s", out)
+	}
+	if !strings.Contains(out, "hi-from-upstream") {
+		t.Errorf("expected response body in logs, got:\n%s", out)
+	}
+	if !strings.Contains(out, "request bodies") {
+		t.Errorf("expected DEBUG body log line, got:\n%s", out)
+	}
+}
+
+func TestBodyLogging_OnButInfoLevel_DoesNotLog(t *testing.T) {
+	b := newFakeBackend("copilot", []string{"gpt-4o"})
+	b.respond = okResponse(`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"created":1}`)
+	baseURL, logs := startServerWithLogging(t, b, true, slog.LevelInfo)
+
+	const reqBody = `{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"sensitive-prompt"}]}`
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+
+	out := logs.String()
+	if strings.Contains(out, "sensitive-prompt") {
+		t.Errorf("logs leaked request body at INFO level:\n%s", out)
+	}
+}
+
+func TestBodyLogging_StreamingResponse_NotCaptured(t *testing.T) {
+	b := newFakeBackend("copilot", []string{"gpt-4o"})
+	const streamBody = `data: {"choices":[{"delta":{"content":"hi"}}]}` + "\n\ndata: [DONE]\n\n"
+	b.respond = func(string, []byte) (*backend.Response, error) {
+		return &backend.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+		}, nil
+	}
+	baseURL, logs := startServerWithLogging(t, b, true, slog.LevelDebug)
+
+	const reqBody = `{"model":"copilot/gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) //nolint:errcheck
+
+	out := logs.String()
+	if !strings.Contains(out, "streaming: not captured") {
+		t.Errorf("expected streaming response to be marked not-captured, got:\n%s", out)
 	}
 }
