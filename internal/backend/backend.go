@@ -145,6 +145,44 @@ type Response struct {
 	Body       io.ReadCloser
 }
 
+// Budget describes a backend's current spend and remaining allowance.
+//
+// Field semantics:
+//   - Currency is a short, lowercase tag describing the unit (e.g.
+//     "bobcoins", "usd"). Empty when the upstream does not report one.
+//   - MaxBudget is the configured ceiling. A value of 0 means "unknown",
+//     and Unlimited reports whether the upstream explicitly marked the
+//     account as having no ceiling (which providers should report as
+//     MaxBudget=0, Unlimited=true).
+//   - Spend is the cumulative amount consumed in the same unit as
+//     MaxBudget.
+//   - Remaining is a convenience field. When MaxBudget is 0 (unknown or
+//     unlimited), backends should set Remaining to 0 and rely on the
+//     caller inspecting Unlimited.
+//   - Extras carries provider-specific supplemental fields (e.g.
+//     instance_id, team_id, team_name) so that surfaces like
+//     /v1/usage/budget can include them without expanding this struct.
+type Budget struct {
+	Currency  string            `json:"currency,omitempty"`
+	MaxBudget float64           `json:"max_budget"`
+	Spend     float64           `json:"spend"`
+	Remaining float64           `json:"remaining"`
+	Unlimited bool              `json:"unlimited,omitempty"`
+	Extras    map[string]string `json:"extras,omitempty"`
+}
+
+// BudgetReporter is an optional capability for backends that expose a
+// per-credential spend / quota figure (e.g. IBM Bob's "Bobcoins"). Backends
+// that cannot report a budget should simply not implement it; callers must
+// be prepared for the type assertion to fail.
+//
+// Implementations should return backend.ErrUnsupported when the configured
+// credential shape does not expose budget info (for example, the legacy
+// IBM Bob API key talks to a backend that does not surface /admin/v1/profile).
+type BudgetReporter interface {
+	Budget(ctx context.Context) (Budget, error)
+}
+
 // Backend is the interface every provider must satisfy.
 //
 // Implementations must be safe for concurrent use.

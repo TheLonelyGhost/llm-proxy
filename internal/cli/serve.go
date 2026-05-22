@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,25 +17,45 @@ import (
 	"github.com/thelonelyghost/llm-proxy/internal/providers/ibmbob"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/openai"
 	"github.com/thelonelyghost/llm-proxy/internal/server"
+	"github.com/thelonelyghost/llm-proxy/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func newServeCmd(out io.Writer) *cobra.Command {
 	var (
-		cfgPath  string
-		address  string
-		port     int
-		logLevel string
+		cfgPath       string
+		address       string
+		port          int
+		logLevel      string
+		traceOn       bool
+		traceExporter string
+		traceSampler  string
+		traceRatio    float64
+		traceService  string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the proxy HTTP server",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			logger := newLogger(out, logLevel)
+			slog.SetDefault(logger)
 
 			cfg, err := loadConfig(cmd, cfgPath)
 			if err != nil {
 				return err
 			}
+			tp, err := telemetry.NewTracerProvider(cmd.Context(), telemetry.Config{
+				Enabled:  traceOn || cfg.Server.Tracing,
+				Exporter: chooseString(traceExporter, cfg.Server.TraceExporter),
+				Sampler:  chooseString(traceSampler, cfg.Server.TraceSampler),
+				Ratio:    chooseFloat(traceRatio, cfg.Server.TraceRatio),
+				Service:  chooseString(traceService, cfg.Server.TraceService),
+				Writer:   out,
+			})
+			if err != nil {
+				return err
+			}
+			defer func() { _ = telemetry.Shutdown(context.Background(), tp) }()
 
 			logger.Debug("loaded configuration",
 				"source", cfg.SourcePath,
@@ -50,7 +71,7 @@ func newServeCmd(out io.Writer) *cobra.Command {
 			}
 
 			reg := backend.NewRegistry()
-			if err := registerBackends(cfg, reg); err != nil {
+			if err := registerBackends(cfg, reg, telemetry.Tracer("providers")); err != nil {
 				return err
 			}
 			if len(reg.Names()) == 0 {
@@ -63,6 +84,7 @@ func newServeCmd(out io.Writer) *cobra.Command {
 				Port:     cfg.Server.Port,
 				Registry: reg,
 				Logger:   logger,
+				Tracer:   telemetry.Tracer("server"),
 			})
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -81,12 +103,17 @@ func newServeCmd(out io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&address, "address", config.DefaultAddress, "interface address to bind")
 	cmd.Flags().IntVar(&port, "port", config.DefaultPort, "TCP port to bind")
 	cmd.Flags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, error")
+	cmd.Flags().BoolVar(&traceOn, "trace", false, "enable OpenTelemetry tracing to stdout")
+	cmd.Flags().StringVar(&traceExporter, "trace-exporter", "", "tracing exporter to use (stdout)")
+	cmd.Flags().StringVar(&traceSampler, "trace-sampler", "", "tracing sampler: always_on, always_off, ratio, parent_based_always_on, parent_based_ratio")
+	cmd.Flags().Float64Var(&traceRatio, "trace-ratio", -1, "tracing sample ratio for ratio-based samplers")
+	cmd.Flags().StringVar(&traceService, "trace-service", "", "service name attached to trace resource")
 	return cmd
 }
 
-func registerBackends(cfg *config.Config, reg *backend.Registry) error {
+func registerBackends(cfg *config.Config, reg *backend.Registry, tracer trace.Tracer) error {
 	for _, b := range cfg.Backends {
-		p, err := buildBackend(b)
+		p, err := buildBackend(b, tracer)
 		if err != nil {
 			return fmt.Errorf("init backend %q: %w", b.Name, err)
 		}
@@ -100,14 +127,14 @@ func registerBackends(cfg *config.Config, reg *backend.Registry) error {
 // buildBackend instantiates the concrete provider for a BackendBlock. It is
 // the single source of truth for the type->constructor mapping so the
 // `serve` and `providers list-models` commands stay in sync.
-func buildBackend(b config.BackendBlock) (backend.Backend, error) {
+func buildBackend(b config.BackendBlock, tracer trace.Tracer) (backend.Backend, error) {
 	switch b.Type {
 	case copilot.Type:
-		return copilot.New(b, copilot.Options{Name: b.Name, Models: b.Models})
+		return copilot.New(b, copilot.Options{Name: b.Name, Models: b.Models, Tracer: tracer})
 	case ibmbob.Type:
-		return ibmbob.New(b, ibmbob.Options{Name: b.Name, Models: b.Models})
+		return ibmbob.New(b, ibmbob.Options{Name: b.Name, Models: b.Models, Tracer: tracer})
 	case openai.Type:
-		return openai.New(b, openai.Options{Name: b.Name, Models: b.Models})
+		return openai.New(b, openai.Options{Name: b.Name, Models: b.Models, Tracer: tracer})
 	default:
 		return nil, fmt.Errorf("backend %q: unknown type %q", b.Name, b.Type)
 	}
@@ -119,4 +146,18 @@ func newLogger(w io.Writer, level string) *slog.Logger {
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: lvl}))
+}
+
+func chooseString(cli, cfg string) string {
+	if cli != "" {
+		return cli
+	}
+	return cfg
+}
+
+func chooseFloat(cli, cfg float64) float64 {
+	if cli >= 0 {
+		return cli
+	}
+	return cfg
 }

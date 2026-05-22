@@ -71,6 +71,26 @@ type modelInfoList struct {
 	Data   []modelInfoItem `json:"data"`
 }
 
+// budgetItem is the per-backend payload returned under /v1/usage/budget.
+// Field names mirror backend.Budget so the JSON shape is stable across
+// the package boundary, with `backend` added so list responses are
+// self-describing.
+type budgetItem struct {
+	Object    string            `json:"object"`
+	Backend   string            `json:"backend"`
+	Currency  string            `json:"currency,omitempty"`
+	MaxBudget float64           `json:"max_budget"`
+	Spend     float64           `json:"spend"`
+	Remaining float64           `json:"remaining"`
+	Unlimited bool              `json:"unlimited,omitempty"`
+	Extras    map[string]string `json:"extras,omitempty"`
+}
+
+type budgetList struct {
+	Object string       `json:"object"`
+	Data   []budgetItem `json:"data"`
+}
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	out := modelList{Object: "list", Data: []modelListItem{}}
 	for _, b := range s.registry.All() {
@@ -123,6 +143,98 @@ func (s *Server) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleBudget reports per-backend spend / quota information for backends
+// that implement backend.BudgetReporter. The response is styled like other
+// OpenAI list endpoints (object/data, snake_case) and includes a backend
+// discriminator on every item.
+//
+// Query parameters:
+//
+//	backend=<prefix>  Restrict the response to a single backend. When
+//	                  omitted, the proxy aggregates every registered
+//	                  backend that implements BudgetReporter.
+//
+// Status codes:
+//
+//	200  one or more backends reported a budget
+//	404  ?backend=<x> was supplied but no such backend is registered
+//	501  the named backend exists but does not implement BudgetReporter,
+//	     or no registered backend implements it
+//	502  upstream failure from a backend that does implement it
+func (s *Server) handleBudget(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("backend")
+
+	if name != "" {
+		b, ok := s.lookupBackend(w, name)
+		if !ok {
+			return
+		}
+		reporter, ok := b.(backend.BudgetReporter)
+		if !ok {
+			writeAPIError(w, http.StatusNotImplemented, "not_implemented",
+				fmt.Sprintf("backend %q does not report budget info", name))
+			return
+		}
+		bud, err := reporter.Budget(r.Context())
+		if err != nil {
+			s.writeBudgetError(w, name, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, budgetToItem(name, bud))
+		return
+	}
+
+	// Aggregate over every registered backend that implements the optional
+	// interface. Backends that don't are skipped silently; upstream errors
+	// from those that do are logged and skipped to keep the aggregate
+	// response useful (a downstream client can ask for a single backend if
+	// it needs a hard failure).
+	out := budgetList{Object: "list", Data: []budgetItem{}}
+	saw := false
+	for _, b := range s.registry.All() {
+		reporter, ok := b.(backend.BudgetReporter)
+		if !ok {
+			continue
+		}
+		saw = true
+		bud, err := reporter.Budget(r.Context())
+		if err != nil {
+			s.logger.Warn("budget fetch failed", "backend", b.Name(), "err", err)
+			continue
+		}
+		out.Data = append(out.Data, budgetToItem(b.Name(), bud))
+	}
+	if !saw {
+		writeAPIError(w, http.StatusNotImplemented, "not_implemented",
+			"no registered backend reports budget info")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func budgetToItem(name string, bud backend.Budget) budgetItem {
+	return budgetItem{
+		Object:    "usage.budget",
+		Backend:   name,
+		Currency:  bud.Currency,
+		MaxBudget: bud.MaxBudget,
+		Spend:     bud.Spend,
+		Remaining: bud.Remaining,
+		Unlimited: bud.Unlimited,
+		Extras:    bud.Extras,
+	}
+}
+
+func (s *Server) writeBudgetError(w http.ResponseWriter, name string, err error) {
+	switch {
+	case errors.Is(err, backend.ErrUnsupported):
+		writeAPIError(w, http.StatusNotImplemented, "not_implemented", err.Error())
+	default:
+		s.logger.Error("budget upstream error", "backend", name, "err", err)
+		writeAPIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+	}
 }
 
 // extractModel decodes just enough of the body to find the "model" field,

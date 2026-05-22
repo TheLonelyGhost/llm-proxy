@@ -54,8 +54,7 @@ func configDirForGOOS(goos string) (string, error) {
 		return "/etc/" + AppName, nil
 	}
 	if goos == "darwin" {
-		legacy := filepath.Join(os.Getenv("HOME"), ".config", AppName)
-		if st, err := os.Stat(legacy); err == nil && st.IsDir() {
+		if legacy, ok := darwinLegacyConfigDir(); ok {
 			return legacy, nil
 		}
 	}
@@ -68,6 +67,18 @@ func configDirForGOOS(goos string) (string, error) {
 		return "", fmt.Errorf("create config dir %q: %w", dir, err)
 	}
 	return dir, nil
+}
+
+func darwinLegacyConfigDir() (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", false
+	}
+	legacy := filepath.Join(home, ".config", AppName)
+	if st, err := os.Stat(legacy); err == nil && st.IsDir() { //nolint:gosec // deliberate existence check for user-owned config path
+		return legacy, true
+	}
+	return "", false
 }
 
 // CacheDir returns the cache directory used for short-lived state such as

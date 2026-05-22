@@ -30,8 +30,13 @@ type Config struct {
 
 // ServerBlock configures the HTTP listener.
 type ServerBlock struct {
-	Address string `hcl:"address,optional"`
-	Port    int    `hcl:"port,optional"`
+	Address       string  `hcl:"address,optional"`
+	Port          int     `hcl:"port,optional"`
+	Tracing       bool    `hcl:"tracing,optional"`
+	TraceExporter string  `hcl:"trace_exporter,optional"`
+	TraceSampler  string  `hcl:"trace_sampler,optional"`
+	TraceRatio    float64 `hcl:"trace_ratio,optional"`
+	TraceService  string  `hcl:"trace_service,optional"`
 }
 
 // BackendBlock is a generic provider configuration. The block label is the

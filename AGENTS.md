@@ -30,7 +30,8 @@ Other tools you must have on PATH:
    task vuln
    task test:cover
    ```
-   Run `task check` to do all of the above in one go.
+   Run `task check` to do all of the above in one go. **ALWAYS RUN `task check`
+   before considering an implmementation complete.**
 
 2. **Coverage threshold is 80%.** `task test:cover` enforces this.
 

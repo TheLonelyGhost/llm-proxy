@@ -13,6 +13,9 @@ import (
 	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // transientBodyMarkers reproduces the reference _RETRY_BODY_MARKERS list:
@@ -29,8 +32,12 @@ const maxRetryPeekBytes = 8 << 10
 // forward issues an outbound request, retrying on retryable failures, and
 // returns a backend.Response whose Body is owned by the caller.
 func (p *Provider) forward(ctx context.Context, method, path string, body []byte, stream bool) (*backend.Response, error) {
+	ctx, span := p.tracer.Start(ctx, "ibmbob.forward")
+	defer span.End()
+	span.SetAttributes(attribute.String("upstream.path", path), attribute.String("upstream.method", method), attribute.Bool("stream", stream))
 	target, pathAndQuery, err := p.buildURL(path)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	var last *http.Response
@@ -39,6 +46,8 @@ func (p *Provider) forward(ctx context.Context, method, path string, body []byte
 		resp, err := p.doRequest(ctx, method, target, pathAndQuery, body)
 		if err != nil {
 			lastErr = err
+			span.RecordError(err)
+			span.AddEvent("request attempt failed", trace.WithAttributes(attribute.Int("attempt", attempt+1)))
 			if attempt == p.maxRetries-1 {
 				return nil, fmt.Errorf("ibmbob request failed after %d attempts: %w", p.maxRetries, err)
 			}
@@ -48,6 +57,7 @@ func (p *Provider) forward(ctx context.Context, method, path string, body []byte
 			continue
 		}
 		if !shouldRetryResponse(resp, stream) {
+			span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 			return &backend.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,
@@ -56,6 +66,7 @@ func (p *Provider) forward(ctx context.Context, method, path string, body []byte
 		}
 		// retryable: drain and try again, unless this was the last attempt.
 		if attempt == p.maxRetries-1 {
+			span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 			return &backend.Response{
 				StatusCode: resp.StatusCode,
 				Header:     resp.Header,
@@ -64,6 +75,7 @@ func (p *Provider) forward(ctx context.Context, method, path string, body []byte
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
+		span.AddEvent("retrying upstream response", trace.WithAttributes(attribute.Int("attempt", attempt+1), attribute.Int("status", resp.StatusCode)))
 		last = resp
 		if sleepErr := sleepCtx(ctx, backoff(attempt, p.retryDelay)); sleepErr != nil {
 			return nil, sleepErr
@@ -82,16 +94,22 @@ func (p *Provider) forward(ctx context.Context, method, path string, body []byte
 
 // doRequest performs a single HTTP attempt with all headers populated.
 func (p *Provider) doRequest(ctx context.Context, method, target, pathAndQuery string, body []byte) (*http.Response, error) {
+	ctx, span := p.tracer.Start(ctx, "ibmbob.do_request")
+	defer span.End()
 	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	p.setHeaders(req, pathAndQuery, body)
 	resp, err := p.client.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "upstream request")
 		return nil, fmt.Errorf("ibmbob upstream: %w", err)
 	}
 	if resp == nil {
+		span.SetStatus(codes.Error, "nil response")
 		return nil, fmt.Errorf("ibmbob upstream: nil response")
 	}
 	return resp, nil
@@ -209,8 +227,11 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // fetchIdentity calls GET /admin/v1/profile and picks an (instance, team)
 // pair the same way the reference implementation does.
 func (p *Provider) fetchIdentity(ctx context.Context) (Identity, error) {
+	ctx, span := p.tracer.Start(ctx, "ibmbob.fetch_identity")
+	defer span.End()
 	target, pathAndQuery, err := p.buildURL(profilePath)
 	if err != nil {
+		span.RecordError(err)
 		return Identity{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
@@ -228,9 +249,11 @@ func (p *Provider) fetchIdentity(ctx context.Context) (Identity, error) {
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {
+		span.RecordError(err)
 		return Identity{}, fmt.Errorf("%w: %w", errProfileFetch, err)
 	}
 	if resp == nil {
+		span.RecordError(errProfileFetch)
 		return Identity{}, fmt.Errorf("%w: nil response", errProfileFetch)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -239,6 +262,8 @@ func (p *Provider) fetchIdentity(ctx context.Context) (Identity, error) {
 		return Identity{}, fmt.Errorf("read profile body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
+		span.SetStatus(codes.Error, http.StatusText(resp.StatusCode))
+		span.AddEvent("profile fetch failed", trace.WithAttributes(attribute.Int("status", resp.StatusCode)))
 		return Identity{}, fmt.Errorf("%w: HTTP %d: %s", errProfileFetch, resp.StatusCode, truncate(string(body), 200))
 	}
 	return pickIdentity(body, p.settings.InstanceID, p.settings.TeamID)

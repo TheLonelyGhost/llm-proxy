@@ -11,6 +11,9 @@ import (
 	"strings"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type rawModelListResponse struct {
@@ -28,9 +31,14 @@ type rawModelEntry struct {
 // forward dispatches an upstream HTTP request to the OpenAI-compatible API.
 // The returned Response.Body is owned by the caller and must be closed.
 func (p *Provider) forward(ctx context.Context, path string, body []byte, _ bool) (*backend.Response, error) {
+	ctx, span := p.tracer.Start(ctx, "openai.forward")
+	defer span.End()
+	span.SetAttributes(attribute.String("upstream.path", path))
 	url := p.settings.BaseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "build request")
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
@@ -42,11 +50,15 @@ func (p *Provider) forward(ctx context.Context, path string, body []byte, _ bool
 
 	resp, err := p.client.Do(req) //nolint:bodyclose // caller closes via backend.Response.Body
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "upstream request")
 		return nil, fmt.Errorf("openai request: %w", err)
 	}
 	if resp == nil {
+		span.SetStatus(codes.Error, "nil response")
 		return nil, fmt.Errorf("nil response from HTTP client")
 	}
+	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 
 	return &backend.Response{
 		StatusCode: resp.StatusCode,
@@ -57,6 +69,8 @@ func (p *Provider) forward(ctx context.Context, path string, body []byte, _ bool
 
 // ListUpstreamModels queries the upstream /v1/models endpoint.
 func (p *Provider) ListUpstreamModels(ctx context.Context) ([]backend.ModelInfo, error) {
+	ctx, span := p.tracer.Start(ctx, "openai.list_models")
+	defer span.End()
 	url := p.settings.BaseURL + "/v1/models"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -70,9 +84,12 @@ func (p *Provider) ListUpstreamModels(ctx context.Context) ([]backend.ModelInfo,
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "list models request")
 		return nil, fmt.Errorf("list models request: %w", err)
 	}
 	if resp == nil {
+		span.SetStatus(codes.Error, "nil response")
 		return nil, fmt.Errorf("nil response from HTTP client")
 	}
 	defer func() {
@@ -82,6 +99,8 @@ func (p *Provider) ListUpstreamModels(ctx context.Context) ([]backend.ModelInfo,
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		span.AddEvent("upstream returned non-200", trace.WithAttributes(attribute.Int("status", resp.StatusCode)))
+		span.SetStatus(codes.Error, http.StatusText(resp.StatusCode))
 		return nil, fmt.Errorf("list models failed with status %d: %s", resp.StatusCode, body)
 	}
 

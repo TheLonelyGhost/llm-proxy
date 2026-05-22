@@ -10,12 +10,15 @@ package openai
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // Type is the HCL `type` value selecting this provider.
@@ -60,6 +63,8 @@ type Provider struct {
 	settings Settings
 	models   []string
 	client   *http.Client
+	logger   *slog.Logger
+	tracer   trace.Tracer
 }
 
 // Options carries non-HCL inputs.
@@ -67,6 +72,7 @@ type Options struct {
 	Name       string
 	Models     []string
 	HTTPClient *http.Client
+	Tracer     trace.Tracer
 }
 
 // New constructs a Provider.
@@ -96,6 +102,10 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
+	tracer := opts.Tracer
+	if tracer == nil {
+		tracer = tracenoop.NewTracerProvider().Tracer(Type)
+	}
 
 	name := opts.Name
 	if name == "" {
@@ -111,6 +121,8 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		settings: s,
 		models:   models,
 		client:   client,
+		logger:   slog.Default(),
+		tracer:   tracer,
 	}, nil
 }
 
@@ -119,6 +131,8 @@ func (p *Provider) Name() string { return p.name }
 
 // Models returns the configured allow-list with full metadata.
 func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
+	ctx, span := p.tracer.Start(ctx, "openai.models")
+	defer span.End()
 	// If no models configured, return empty list (allow-list mode)
 	if len(p.models) == 0 {
 		return nil, nil
@@ -127,6 +141,9 @@ func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
 	// Get full model metadata from upstream
 	allModels, err := p.ListUpstreamModels(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.AddEvent("upstream model listing failed; using configured allow-list")
+		p.logger.Warn("openai model listing failed; using allow-list fallback", "backend", p.name, "err", err)
 		// Fallback to minimal ModelInfo if upstream query fails
 		out := make([]backend.ModelInfo, 0, len(p.models))
 		for _, m := range p.models {

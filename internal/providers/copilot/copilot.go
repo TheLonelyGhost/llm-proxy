@@ -17,11 +17,14 @@ package copilot
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // Type is the value users put in `backend "x" { type = ... }` to select this
@@ -104,6 +107,8 @@ type Provider struct {
 	models   []string
 	auth     *Authenticator
 	http     *http.Client
+	logger   *slog.Logger
+	tracer   trace.Tracer
 }
 
 // Options are inputs to New that come from outside the HCL block (paths,
@@ -123,6 +128,7 @@ type Options struct {
 	// device-code poll intervals. Intended for tests; zero leaves the
 	// default of time.Second in place.
 	IntervalUnit time.Duration
+	Tracer       trace.Tracer
 }
 
 // New constructs a Provider from a BackendBlock and Options.
@@ -153,6 +159,10 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
+	tracer := opts.Tracer
+	if tracer == nil {
+		tracer = tracenoop.NewTracerProvider().Tracer(Type)
+	}
 
 	auth := NewAuthenticator(AuthConfig{
 		ClientID:        s.OAuthClientID,
@@ -163,6 +173,7 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		Store:           store,
 		HTTPClient:      client,
 		IntervalUnit:    opts.IntervalUnit,
+		Tracer:          tracer,
 	})
 
 	name := opts.Name
@@ -180,6 +191,8 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		models:   models,
 		auth:     auth,
 		http:     client,
+		logger:   slog.Default(),
+		tracer:   tracer,
 	}, nil
 }
 
@@ -197,6 +210,8 @@ func (p *Provider) Auth() *Authenticator { return p.auth }
 // upstream list churns and depends on the user's entitlement; operators
 // should pin the models they trust in HCL.
 func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
+	ctx, span := p.tracer.Start(ctx, "copilot.models")
+	defer span.End()
 	// If no models configured, return empty list (allow-list mode)
 	if len(p.models) == 0 {
 		return nil, nil
@@ -205,6 +220,9 @@ func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
 	// Get full model metadata from upstream
 	allModels, err := p.ListUpstreamModels(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.AddEvent("upstream model listing failed; using configured allow-list")
+		p.logger.Warn("copilot model listing failed; using allow-list fallback", "backend", p.name, "err", err)
 		// Fallback to minimal ModelInfo if upstream query fails
 		out := make([]backend.ModelInfo, 0, len(p.models))
 		for _, m := range p.models {

@@ -14,6 +14,7 @@ import (
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/paths"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // newProvidersCmd returns the `providers` command group: read-only helpers
@@ -66,7 +67,7 @@ func newProvidersListModelsCmd(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := buildBackend(*block)
+			b, err := buildBackend(*block, tracenoop.NewTracerProvider().Tracer("providers"))
 			if err != nil {
 				return fmt.Errorf("init backend %q: %w", block.Name, err)
 			}

@@ -24,6 +24,7 @@ Currently supported backends:
   - `/v1/responses` - Unified response objects with reasoning effort support
   - `/v1/models` - Aggregated model list (OpenAI spec format)
   - `/v1/model/info` - Extended model metadata with capabilities, token limits, and reasoning effort levels
+  - `/v1/usage/budget` - Per-backend spend / quota (proxy extension; IBM Bob "Bobcoins" today)
   - `/healthz` - Health check endpoint
 - HCL2 configuration: single file _or_ directory of `*.hcl` files; supports
   `env("NAME")` interpolation so secrets never need to live on disk. The

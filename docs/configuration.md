@@ -23,6 +23,13 @@ overwrite, so split your config however suits you.
 server {
   address = "127.0.0.1"   # interface to bind; default 127.0.0.1
   port    = 4980          # TCP port; default 4980
+
+  # Tracing is opt-in. When enabled, spans can be exported to stdout.
+  tracing       = false
+  trace_exporter = "stdout"
+  trace_sampler  = "always_on"
+  trace_ratio    = 1.0
+  trace_service  = "llm-proxy"
 }
 
 backend "<prefix>" {      # routing prefix; lowercase, no slashes
@@ -48,6 +55,19 @@ explicitly passed:
 `LLM_PROXY_CONFIG` and then the platform default path above.
 
 Use `--log-level debug|info|warn|error` to control structured log verbosity.
+Use `--trace` to enable tracing from the CLI, or configure the same settings in
+the `server` block with `tracing`, `trace_exporter`, `trace_sampler`,
+`trace_ratio`, and `trace_service`.
+
+Sampling modes:
+
+- `always_on`
+- `always_off`
+- `ratio`
+- `parent_based_always_on`
+- `parent_based_ratio`
+
+`trace_ratio` applies only to ratio-based samplers.
 
 ## env() interpolation
 
@@ -94,6 +114,7 @@ The proxy exposes:
 | GET    | `/healthz`                 | Liveness; returns registered backend names |
 | GET    | `/v1/models`               | Aggregated, prefix-qualified model list    |
 | GET    | `/v1/model/info`           | Model capabilities and token limits        |
+| GET    | `/v1/usage/budget`         | Per-backend spend / quota (provider ext.)  |
 | POST   | `/v1/chat/completions`     | OpenAI chat completions (SSE supported)    |
 | POST   | `/v1/completions`          | Legacy text completions                    |
 | POST   | `/v1/embeddings`           | Embeddings                                 |
@@ -101,6 +122,54 @@ The proxy exposes:
 
 The client's `Authorization` header is ignored entirely; the proxy injects the
 backend's own credentials. Request bodies are capped at 8 MiB.
+
+### Budget / quota reporting
+
+`/v1/usage/budget` is a proxy extension (no OpenAI counterpart) that surfaces
+the per-credential spend / ceiling for backends that expose one. Today only
+the IBM Bob backend implements it; see
+[`docs/providers/ibm-bob.md`](providers/ibm-bob.md#budget-reporting) for the
+upstream details and the meaning of each field.
+
+- `GET /v1/usage/budget` aggregates every backend that supports it. Backends
+  that do not are silently skipped. If no registered backend supports
+  reporting, the proxy returns `501 Not Implemented`.
+- `GET /v1/usage/budget?backend=<prefix>` returns a single item or an error:
+  `404` if the prefix is unknown, `501` if the backend exists but does not
+  report budget, `502` for any upstream failure.
+- The response is styled like other OpenAI list endpoints (`object`/`data`,
+  snake_case fields). The aggregate form looks like:
+
+  ```json
+  {
+    "object": "list",
+    "data": [
+      {
+        "object": "usage.budget",
+        "backend": "ibmbob",
+        "currency": "bobcoins",
+        "max_budget": 100,
+        "spend": 12.5,
+        "remaining": 87.5,
+        "unlimited": false,
+        "extras": {
+          "team_id": "team-1",
+          "team_name": "Platform"
+        }
+      }
+    ]
+  }
+  ```
+
+  The single-backend form (with `?backend=`) returns the inner object
+  directly (no `data` envelope).
+
+  Special values:
+  - `unlimited: true` means the upstream reports the account has no ceiling;
+    in that case `max_budget` and `remaining` are forced to `0` because the
+    numbers would be meaningless. Surface `unlimited` to humans first.
+  - `max_budget: 0` with `unlimited: false` means the upstream did not report
+    a ceiling (treat as unknown, not as exhausted).
 
 ### Model capability discovery
 

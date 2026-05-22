@@ -5,6 +5,7 @@
 //	GET  /healthz                   -> 200 OK liveness probe
 //	GET  /v1/models                 -> aggregated, prefix-qualified model list (OpenAI spec)
 //	GET  /v1/model/info             -> model info with capabilities, token limits, reasoning effort levels
+//	GET  /v1/usage/budget           -> per-backend spend / quota (provider-extension; ibm-bob "Bobcoins" today)
 //	POST /v1/chat/completions       -> routed to backend (streaming preserved)
 //	POST /v1/completions            -> legacy completions
 //	POST /v1/embeddings             -> embeddings
@@ -28,6 +29,10 @@ import (
 	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // Server is the proxy HTTP server.
@@ -35,6 +40,7 @@ type Server struct {
 	addr     string
 	registry *backend.Registry
 	logger   *slog.Logger
+	tracer   trace.Tracer
 
 	httpServer *http.Server
 }
@@ -45,6 +51,7 @@ type Options struct {
 	Port     int
 	Registry *backend.Registry
 	Logger   *slog.Logger
+	Tracer   trace.Tracer
 	// ReadHeaderTimeout caps how long the server will wait for headers.
 	ReadHeaderTimeout time.Duration
 	// IdleTimeout caps idle keep-alive connections.
@@ -64,16 +71,21 @@ func New(opts Options) *Server {
 	if opts.IdleTimeout == 0 {
 		opts.IdleTimeout = 120 * time.Second
 	}
+	if opts.Tracer == nil {
+		opts.Tracer = tracenoop.NewTracerProvider().Tracer("server")
+	}
 	addr := net.JoinHostPort(opts.Address, strconv.Itoa(opts.Port))
 	s := &Server{
 		addr:     addr,
 		registry: opts.Registry,
 		logger:   logger,
+		tracer:   opts.Tracer,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("GET /v1/model/info", s.handleModelInfo)
+	mux.HandleFunc("GET /v1/usage/budget", s.handleBudget)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
 	mux.HandleFunc("POST /v1/completions", s.handleCompletion)
 	mux.HandleFunc("POST /v1/embeddings", s.handleEmbedding)
@@ -81,7 +93,7 @@ func New(opts Options) *Server {
 
 	s.httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           withLogging(logger, mux),
+		Handler:           withLogging(logger, s.tracer, mux),
 		ReadHeaderTimeout: opts.ReadHeaderTimeout,
 		IdleTimeout:       opts.IdleTimeout,
 	}
@@ -156,11 +168,23 @@ func writeAPIError(w http.ResponseWriter, status int, kind, msg string) {
 }
 
 // withLogging emits a structured access log line per request.
-func withLogging(logger *slog.Logger, next http.Handler) http.Handler {
+func withLogging(logger *slog.Logger, tracer trace.Tracer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rw := &statusRecorder{ResponseWriter: w, status: 200}
+		ctx, span := tracer.Start(r.Context(), "http.request")
+		r = r.WithContext(ctx)
 		next.ServeHTTP(rw, r)
+		span.SetAttributes(
+			attribute.String("http.method", r.Method),
+			attribute.String("http.route", r.URL.Path),
+			attribute.Int("http.status_code", rw.status),
+			attribute.String("net.peer.addr", r.RemoteAddr),
+		)
+		if rw.status >= 500 {
+			span.SetStatus(codes.Error, http.StatusText(rw.status))
+		}
+		span.End()
 		logger.Info("request",
 			"method", r.Method,
 			"path", r.URL.Path,

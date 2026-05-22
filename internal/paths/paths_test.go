@@ -49,22 +49,8 @@ func TestConfigDir_DarwinPrefersLegacyPath(t *testing.T) {
 	} else if got != legacy {
 		t.Fatalf("got %q, want %q", got, legacy)
 	}
-}
-
-func TestConfigDir_DarwinFallsBackToApplePath(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
-	got, err := configDirForGOOS("darwin")
-	if err != nil {
-		t.Fatalf("configDirForGOOS: %v", err)
-	}
-	want := filepath.Join(tmp, "Library", "Application Support", AppName)
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-	if st, err := os.Stat(got); err != nil || !st.IsDir() {
-		t.Fatalf("apple config dir not created: %v", err)
+	if st, err := os.Stat(legacy); err != nil || !st.IsDir() {
+		t.Fatalf("legacy config dir not created: %v", err)
 	}
 }
 

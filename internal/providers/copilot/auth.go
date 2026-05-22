@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/paths"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // GitHubToken is the long-lived OAuth token obtained via device-code flow.
@@ -31,6 +35,107 @@ type CopilotToken struct {
 	ExpiresAt int64  `json:"expires_at"`
 	// Endpoints carries upstream-specified API endpoints, when present.
 	Endpoints map[string]string `json:"endpoints,omitempty"`
+}
+
+// CopilotQuotaSnapshot describes a single per-category quota line item as
+// returned by GitHub under quota_snapshots in /copilot_internal/v2/token.
+// Field names mirror the upstream payload so the JSON decode is a direct
+// pass-through.
+type CopilotQuotaSnapshot struct {
+	Entitlement      float64 `json:"entitlement"`
+	Remaining        float64 `json:"remaining"`
+	PercentRemaining float64 `json:"percent_remaining"`
+	Unlimited        bool    `json:"unlimited"`
+	OverageCount     float64 `json:"overage_count"`
+	OveragePermitted bool    `json:"overage_permitted"`
+}
+
+// CopilotTokenResponse is the full /copilot_internal/v2/token payload,
+// including the quota fields the official editor extensions display.
+//
+// The endpoint is the only native GitHub surface that returns quota info
+// without admin scopes; calling it both rotates the short-lived API token
+// and returns the snapshot. The proxy persists the rotated token as a
+// useful side effect of fetching quota.
+type CopilotTokenResponse struct {
+	Token     string `json:"token"`
+	ExpiresAt int64  `json:"expires_at"`
+	// RefreshIn is how many seconds the client should wait before
+	// refreshing the token. Informational only here.
+	RefreshIn int `json:"refresh_in"`
+
+	ChatEnabled bool `json:"chat_enabled"`
+
+	// QuotaSnapshots is the modern (Pro / Pro+ / Business / Enterprise)
+	// quota surface. Keys are commonly "chat", "completions", and
+	// "premium_interactions"; the proxy keys off the latter as its
+	// canonical "Copilot budget" indicator.
+	QuotaSnapshots map[string]CopilotQuotaSnapshot `json:"quota_snapshots,omitempty"`
+	// QuotaResetDate is the next monthly reset (YYYY-MM-DD).
+	QuotaResetDate string `json:"quota_reset_date,omitempty"`
+
+	// LimitedUserQuotas is the legacy / free-tier counter (raw remaining
+	// counts, no entitlement field). Present for accounts that don't have
+	// a modern quota_snapshots block.
+	LimitedUserQuotas    map[string]float64 `json:"limited_user_quotas,omitempty"`
+	LimitedUserResetDate string             `json:"limited_user_reset_date,omitempty"`
+
+	// Endpoints carries upstream-specified API endpoints, when present.
+	Endpoints map[string]string `json:"endpoints,omitempty"`
+}
+
+// AsCopilotToken extracts the persistence-friendly subset used by the
+// cached short-lived token store.
+func (r *CopilotTokenResponse) AsCopilotToken() *CopilotToken {
+	return &CopilotToken{
+		Token:     r.Token,
+		ExpiresAt: r.ExpiresAt,
+		Endpoints: r.Endpoints,
+	}
+}
+
+// CopilotUserInfo is the response shape of GitHub's
+// `GET /copilot_internal/user` endpoint. It is the canonical source of
+// per-user Copilot quota data: it works across plan tiers (Individual /
+// Pro / Pro+ / Business / Enterprise), uses the long-lived GitHub OAuth
+// token directly (no separate exchange step), and does not rotate the
+// short-lived API token as a side effect.
+//
+// The /copilot_internal/v2/token endpoint also returns quota_snapshots for
+// some plan tiers, but Business and Enterprise seats receive
+// `limited_user_quotas: null` with no `quota_snapshots` key there - the
+// per-user quota lives only on /copilot_internal/user for them. This type
+// is therefore the proxy's preferred source for budget data.
+//
+// Fields are a superset of CopilotTokenResponse: the same quota_snapshots
+// shape plus identifying metadata (copilot_plan, organization_list, ...)
+// surfaced via Extras on backend.Budget.
+type CopilotUserInfo struct {
+	Login          string `json:"login"`
+	CopilotPlan    string `json:"copilot_plan,omitempty"`
+	AccessTypeSKU  string `json:"access_type_sku,omitempty"`
+	ChatEnabled    bool   `json:"chat_enabled,omitempty"`
+	AssignedDate   string `json:"assigned_date,omitempty"`
+	QuotaResetDate string `json:"quota_reset_date,omitempty"`
+	// QuotaResetDateUTC is an ISO-8601 timestamp; populated by the
+	// /copilot_internal/user endpoint but not by /v2/token.
+	QuotaResetDateUTC string `json:"quota_reset_date_utc,omitempty"`
+
+	QuotaSnapshots map[string]CopilotQuotaSnapshot `json:"quota_snapshots,omitempty"`
+	// LimitedUserQuotas is present only on the legacy free-tier shape.
+	LimitedUserQuotas    map[string]float64 `json:"limited_user_quotas,omitempty"`
+	LimitedUserResetDate string             `json:"limited_user_reset_date,omitempty"`
+
+	// OrganizationList is non-empty for Business/Enterprise seats.
+	OrganizationList []CopilotOrganization `json:"organization_list,omitempty"`
+}
+
+// CopilotOrganization is a single org entry under /copilot_internal/user's
+// organization_list field. Only the fields the proxy surfaces are
+// modelled; unknown JSON keys are ignored.
+type CopilotOrganization struct {
+	Login string `json:"login"`
+	Name  string `json:"name,omitempty"`
 }
 
 // Expiry returns the absolute expiry time.
@@ -172,6 +277,7 @@ type AuthConfig struct {
 	// device-code interval responses. Zero means time.Second. Tests can
 	// override this to make polling subsecond.
 	IntervalUnit time.Duration
+	Tracer       trace.Tracer
 }
 
 // DefaultRefreshSkew is the buffer subtracted from a Copilot token's expiry
@@ -197,6 +303,9 @@ func NewAuthenticator(cfg AuthConfig) *Authenticator {
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	if cfg.Tracer == nil {
+		cfg.Tracer = tracenoop.NewTracerProvider().Tracer("copilot.auth")
+	}
 	return &Authenticator{cfg: cfg}
 }
 
@@ -211,6 +320,8 @@ type DeviceCodeResponse struct {
 
 // RequestDeviceCode initiates the device-code flow.
 func (a *Authenticator) RequestDeviceCode(ctx context.Context) (*DeviceCodeResponse, error) {
+	ctx, span := a.cfg.Tracer.Start(ctx, "copilot.request_device_code")
+	defer span.End()
 	form := url.Values{}
 	form.Set("client_id", a.cfg.ClientID)
 	form.Set("scope", "read:user")
@@ -226,6 +337,7 @@ func (a *Authenticator) RequestDeviceCode(ctx context.Context) (*DeviceCodeRespo
 
 	body, err := a.do(req)
 	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("request device code: %w", err)
 	}
 	var resp DeviceCodeResponse
@@ -244,6 +356,8 @@ func (a *Authenticator) RequestDeviceCode(ctx context.Context) (*DeviceCodeRespo
 // PollForToken polls GitHub until the user has authorised, the request
 // expires, or ctx is cancelled.
 func (a *Authenticator) PollForToken(ctx context.Context, code *DeviceCodeResponse) (*GitHubToken, error) {
+	ctx, span := a.cfg.Tracer.Start(ctx, "copilot.poll_for_token")
+	defer span.End()
 	interval := time.Duration(code.Interval) * a.cfg.IntervalUnit
 	deadline := time.Now().Add(time.Duration(code.ExpiresIn) * a.cfg.IntervalUnit)
 	for {
@@ -272,6 +386,7 @@ func (a *Authenticator) PollForToken(ctx context.Context, code *DeviceCodeRespon
 
 		body, err := a.do(req)
 		if err != nil {
+			span.RecordError(err)
 			return nil, fmt.Errorf("poll for token: %w", err)
 		}
 
@@ -287,6 +402,7 @@ func (a *Authenticator) PollForToken(ctx context.Context, code *DeviceCodeRespon
 			return nil, fmt.Errorf("decode poll response: %w", err)
 		}
 		if payload.AccessToken != "" {
+			span.SetAttributes(attribute.String("oauth.result", "authorized"))
 			tok := &GitHubToken{
 				AccessToken: payload.AccessToken,
 				TokenType:   payload.TokenType,
@@ -300,14 +416,17 @@ func (a *Authenticator) PollForToken(ctx context.Context, code *DeviceCodeRespon
 		}
 		switch payload.Error {
 		case "authorization_pending":
+			span.AddEvent("authorization pending")
 			// keep polling
 		case "slow_down":
+			span.AddEvent("server asked client to slow down")
 			if payload.Interval > 0 {
 				interval = time.Duration(payload.Interval) * a.cfg.IntervalUnit
 			} else {
 				interval += 5 * a.cfg.IntervalUnit
 			}
 		case "expired_token", "access_denied":
+			span.SetStatus(codes.Error, payload.Error)
 			return nil, fmt.Errorf("device-code flow failed: %s: %s", payload.Error, payload.ErrorDescription)
 		case "":
 			return nil, fmt.Errorf("empty poll response: %s", string(body))
@@ -328,6 +447,8 @@ func (a *Authenticator) Logout() error {
 // CopilotToken returns a valid short-lived Copilot API token, refreshing
 // from disk cache or via exchange as needed.
 func (a *Authenticator) CopilotToken(ctx context.Context) (*CopilotToken, error) {
+	ctx, span := a.cfg.Tracer.Start(ctx, "copilot.copilot_token")
+	defer span.End()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -340,23 +461,28 @@ func (a *Authenticator) CopilotToken(ctx context.Context) (*CopilotToken, error)
 		if t, err := a.cfg.Store.LoadCopilotToken(); err == nil && t != nil {
 			a.cpCached = t
 			if !t.Expired(now, a.cfg.Skew) {
+				span.AddEvent("reused cached copilot token")
 				return t, nil
 			}
 		}
 	}
 	gh, err := a.cfg.Store.LoadGitHubToken()
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	tok, err := a.exchange(ctx, gh)
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
-	if err := a.cfg.Store.SaveCopilotToken(tok); err != nil {
+	cached := tok.AsCopilotToken()
+	if err := a.cfg.Store.SaveCopilotToken(cached); err != nil {
 		return nil, fmt.Errorf("save copilot token: %w", err)
 	}
-	a.cpCached = tok
-	return tok, nil
+	a.cpCached = cached
+	span.AddEvent("refreshed copilot token")
+	return cached, nil
 }
 
 // Invalidate drops any cached Copilot token (both in-memory and on disk) so
@@ -369,11 +495,31 @@ func (a *Authenticator) Invalidate() {
 	_ = a.cfg.Store.DeleteCopilotToken()
 }
 
-// exchange calls the GitHub /copilot_internal/v2/token endpoint.
-func (a *Authenticator) exchange(ctx context.Context, gh *GitHubToken) (*CopilotToken, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		a.cfg.GitHubAPIBase+"/copilot_internal/v2/token", nil)
+// FetchUserInfo issues a fresh `GET /copilot_internal/user` call using the
+// stored GitHub OAuth token and returns the parsed response, including
+// per-user quota snapshots.
+//
+// This endpoint is the proxy's canonical source for Copilot budget data:
+// it works across Individual / Pro / Pro+ / Business / Enterprise plans,
+// uses the long-lived GitHub token directly (no separate token exchange),
+// and has no side effects on the cached short-lived API token. It is the
+// same surface the official editor extensions read from to populate the
+// "Manage Copilot" panel.
+//
+// Returns ErrNotAuthenticated when the proxy has no stored GitHub token.
+func (a *Authenticator) FetchUserInfo(ctx context.Context) (*CopilotUserInfo, error) {
+	ctx, span := a.cfg.Tracer.Start(ctx, "copilot.fetch_user_info")
+	defer span.End()
+
+	gh, err := a.cfg.Store.LoadGitHubToken()
 	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		a.cfg.GitHubAPIBase+"/copilot_internal/user", nil)
+	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	req.Header.Set("Authorization", "token "+gh.AccessToken)
@@ -382,16 +528,44 @@ func (a *Authenticator) exchange(ctx context.Context, gh *GitHubToken) (*Copilot
 	req.Header.Set("Editor-Version", a.cfg.EditorVersion)
 	body, err := a.do(req)
 	if err != nil {
+		span.RecordError(err)
+		return nil, fmt.Errorf("fetch copilot user info: %w", err)
+	}
+	var info CopilotUserInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("decode copilot user info: %w", err)
+	}
+	return &info, nil
+}
+
+// exchange calls the GitHub /copilot_internal/v2/token endpoint.
+func (a *Authenticator) exchange(ctx context.Context, gh *GitHubToken) (*CopilotTokenResponse, error) {
+	ctx, span := a.cfg.Tracer.Start(ctx, "copilot.exchange_token")
+	defer span.End()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		a.cfg.GitHubAPIBase+"/copilot_internal/v2/token", nil)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+	req.Header.Set("Authorization", "token "+gh.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", a.cfg.UserAgent)
+	req.Header.Set("Editor-Version", a.cfg.EditorVersion)
+	body, err := a.do(req)
+	if err != nil {
+		span.RecordError(err)
 		return nil, fmt.Errorf("exchange copilot token: %w", err)
 	}
-	var tok CopilotToken
-	if err := json.Unmarshal(body, &tok); err != nil {
+	var resp CopilotTokenResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("decode copilot token: %w", err)
 	}
-	if tok.Token == "" {
+	if resp.Token == "" {
+		span.SetStatus(codes.Error, "empty token")
 		return nil, fmt.Errorf("empty copilot token in response: %s", string(body))
 	}
-	return &tok, nil
+	return &resp, nil
 }
 
 func (a *Authenticator) do(req *http.Request) ([]byte, error) {

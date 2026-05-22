@@ -159,6 +159,140 @@ Streaming responses are not retried after the response begins.
 instance. Restarting the proxy forces a re-derivation. To opt out entirely,
 set both `instance_id` and `team_id` in HCL.
 
+Note that the budget endpoint described below intentionally bypasses this
+cache and calls `/admin/v1/profile` on every request — the operational
+intent is "show the user a live balance", and 5-minute-stale figures defeat
+that. Identity selection (which `instance_id`/`team_id` to use) still
+respects the cache.
+
+## Budget reporting
+
+IBM Bob meters usage in **Bobcoins** — a per-team, per-instance allowance
+exposed on the same `/admin/v1/profile` endpoint the proxy already uses to
+derive identity. The proxy surfaces this via the generic
+[`/v1/usage/budget`](../configuration.md#budget--quota-reporting) endpoint.
+
+### Where the numbers come from
+
+For an IBM Bob backend with a JWT or new-style API key, the proxy issues:
+
+```http
+GET /admin/v1/profile
+Authorization: Bearer <api_key>     # or "Apikey <api_key>" for new-style keys
+User-Agent: <user_agent>
+x-instance-id: <resolved instance>
+x-team-id:     <resolved team>
+x-request-timestamp: <RFC-3339 ms UTC>
+x-request-signature: <HMAC-SHA256 of canonical request>
+```
+
+The upstream response (abridged):
+
+```json
+{
+  "user_id": "user-42",
+  "instances": [{
+    "instance_id":   "inst-1",
+    "instance_name": "Acme prod",
+    "teams": [{
+      "id":            "team-1",
+      "name":          "Platform",
+      "budget_limit":  100,
+      "usage":         12.5
+    }]
+  }]
+}
+```
+
+The provider applies the same selection rules as elsewhere — `instance_id`
+and `team_id` from HCL win, otherwise the first instance and first team are
+used — and maps the fields to:
+
+| `/v1/usage/budget` field | Upstream source                                  |
+| ------------------------ | ------------------------------------------------ |
+| `currency`               | constant `"bobcoins"`                            |
+| `max_budget`             | `teams[].budget_limit` (`-1` -> `0` + `unlimited: true`) |
+| `spend`                  | `teams[].usage`                                  |
+| `remaining`              | `max_budget - spend`, or `0` when unlimited      |
+| `extras.user_id`         | `user_id`                                        |
+| `extras.instance_id`     | selected `instances[].instance_id`               |
+| `extras.instance_name`   | selected `instances[].instance_name`             |
+| `extras.team_id`         | selected `teams[].id`                            |
+| `extras.team_name`       | selected `teams[].name`                          |
+
+### Calling it
+
+Assuming the proxy is running at `127.0.0.1:4980` and your HCL block is
+labelled `bob` (giving the routing prefix `bob`):
+
+```sh
+# Aggregate every reporting backend.
+curl -s http://127.0.0.1:4980/v1/usage/budget | jq
+
+# Just IBM Bob.
+curl -s 'http://127.0.0.1:4980/v1/usage/budget?backend=bob' | jq
+```
+
+Sample output for a single backend:
+
+```json
+{
+  "object": "usage.budget",
+  "backend": "bob",
+  "currency": "bobcoins",
+  "max_budget": 100,
+  "spend": 12.5,
+  "remaining": 87.5,
+  "extras": {
+    "instance_id": "inst-1",
+    "instance_name": "Acme prod",
+    "team_id": "team-1",
+    "team_name": "Platform",
+    "user_id": "user-42"
+  }
+}
+```
+
+### Caveats
+
+- **Legacy keys are not supported.** `sk-`/`pk-` keys route to the staging
+  backend, which does not expose `/admin/v1/profile`; the proxy returns
+  `501 Not Implemented` in that case.
+- **No caching.** Every call hits the upstream. This is by design so
+  `/bobcoins`-style slash commands feel live to the user. If you wrap this
+  with a slash command in opencode, run it sparingly and avoid embedding it
+  in tight automation loops.
+- **`unlimited: true` overrides the numbers.** When the upstream returns
+  `budget_limit: -1`, surface "unlimited" rather than the literal `0`s in
+  `max_budget` / `remaining`.
+
+### Using it from opencode
+
+Two recommended ways to bring this into an opencode session — see the
+[examples directory](../../examples/opencode/) for ready-to-copy files.
+
+1. **Slash command** (zero opencode internals):
+
+   Create `.opencode/command/llm-budget.md` in your workspace (or
+   `~/.config/opencode/command/llm-budget.md` for a user-global command):
+
+   ```markdown
+   ---
+   description: Show remaining quota via the local proxy.
+   ---
+
+   !`curl -sf http://127.0.0.1:4980/v1/usage/budget \
+     | jq -r '.data[] | "\(.backend): \(.spend) spent / \(.max_budget) \(.currency) -> \(.remaining) remaining"'`
+   ```
+
+   Then in opencode run `/llm-budget`. The `!`...`` ` syntax executes the
+   shell command and embeds its output into the prompt; combined with the
+   YAML front matter, opencode treats this as a self-contained slash
+   command.
+
+2. **Raw HTTP** — wire any other tool (status bar, shell prompt, MCP
+   server, CI guard) at the same URL. The response format is stable.
+
 ## Discovering available models
 
 The `providers list-models` subcommand queries the upstream catalogue
