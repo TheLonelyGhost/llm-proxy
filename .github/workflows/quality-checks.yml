@@ -1,0 +1,68 @@
+name: Quality
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  static:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: go fmt
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: go build
+        run: go build -v ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+
+      - name: install tooling
+        run: |
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: govulncheck
+        run: govulncheck ./...
+
+      - name: nilaway
+        run: nilaway ./...
+
+  tests:
+    name: test
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: go test
+        run: |
+          go test -race -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -n 1
+
+      - name: minimum required test coverage
+        run: |
+          pct=$(go tool cover -func=coverage.out | awk '/total:/ {print $3}' | tr -d '%')
+          awk -v p="$pct" -v t="80" 'BEGIN { if (p+0 < t+0) { printf "coverage %s%% < threshold %s%%\n", p, t; exit 1 } else { printf "coverage %s%% >= threshold %s%%\n", p, t } }'

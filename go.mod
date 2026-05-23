@@ -1,6 +1,6 @@
 module github.com/thelonelyghost/llm-proxy
 
-go 1.25.0
+go 1.26.3
 
 require (
 	github.com/hashicorp/hcl/v2 v2.24.0
