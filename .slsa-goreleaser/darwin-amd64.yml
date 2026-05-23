@@ -1,0 +1,18 @@
+version: 1
+
+env:
+  - GO111MODULE=on
+  - CGO_ENABLED=0
+
+flags:
+  - -trimpath
+
+goos: darwin
+goarch: amd64
+
+main: ./cmd/llm-proxy
+
+binary: llm-proxy-{{ .Os }}-{{ .Arch }}
+
+ldflags:
+  - "-X github.com/thelonelyghost/llm-proxy/internal/cli.Version={{ .Env.VERSION }}"
