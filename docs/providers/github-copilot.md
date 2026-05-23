@@ -9,6 +9,8 @@ embeddings endpoints.
 > account you authorise with. Using this proxy with that account is subject to
 > GitHub's Acceptable Use Policies. This project is not affiliated with GitHub
 > or Microsoft.
+>
+> Supports Individual, Pro, Pro+, Business, or Enterprise accounts for Copilot.
 
 ## One-time login
 
@@ -47,6 +49,7 @@ backend "copilot" {
   type   = "github-copilot"
   models = ["gpt-4o", "claude-3.5-sonnet"]
 
+  # OPTIONAL:
   api_base              = "https://api.githubcopilot.com"
   github_api_base       = "https://api.github.com"
   github_login_base     = "https://github.com"
@@ -293,8 +296,8 @@ Sample output for a Copilot Business user:
     "chat_enabled": "true",
     "copilot_plan": "business",
     "login": "octocat",
-    "organization_login": "hashicorp",
-    "organization_name": "HashiCorp",
+    "organization_login": "contoso",
+    "organization_name": "Contoso, LLC",
     "primary_source": "premium_interactions",
     "quota_reset_date": "2026-06-01",
     "quota_reset_date_utc": "2026-06-01T00:00:00.000Z",

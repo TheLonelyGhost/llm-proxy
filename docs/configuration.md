@@ -4,8 +4,8 @@
 order:
 
 1. `-c` / `--config`
-2. `LLM_PROXY_CONFIG`
-3. `/etc/llm-proxy/config.hcl` on non-Windows, or `C:/ProgramData/llm-proxy/config.hcl` on Windows
+2. `LLM_PROXY_CONFIG` (environment variable)
+3. `~/.config/llm-proxy/config.hcl`  on non-Windows, or `C:\ProgramData\llm-proxy\config.hcl` on Windows
 
 The config path may point at either:
 
@@ -25,7 +25,7 @@ server {
   port    = 4980          # TCP port; default 4980
 
   # Tracing is opt-in. When enabled, spans can be exported to stdout.
-  tracing       = false
+  tracing        = false
   trace_exporter = "stdout"
   trace_sampler  = "always_on"
   trace_ratio    = 1.0
@@ -39,6 +39,7 @@ server {
 backend "<prefix>" {      # routing prefix; lowercase, no slashes
   type   = "<provider>"   # provider implementation; e.g. "github-copilot"
   models = ["..."]        # allow-list of upstream model ids (optional)
+
   # provider-specific attributes follow
 }
 ```
@@ -55,8 +56,8 @@ explicitly passed:
 - `--address <ip>` overrides `server.address`
 - `--port <int>` overrides `server.port`
 
-`-c` / `--config` is optional; if omitted, the proxy uses
-`LLM_PROXY_CONFIG` and then the platform default path above.
+`-c` / `--config` is optional; if omitted, the proxy uses `LLM_PROXY_CONFIG` and
+then the platform default path above.
 
 Use `--log-level debug|info|warn|error` to control structured log verbosity.
 Use `--trace` to enable tracing from the CLI, or configure the same settings in
@@ -131,8 +132,8 @@ The proxy is deliberately near-stateless. The only files it writes are:
 - **macOS:** `~/Library/Application Support/llm-proxy/`, `~/Library/Caches/llm-proxy/`
 - **Windows:** `%AppData%\llm-proxy\`, `%LocalAppData%\llm-proxy\`
 
-Both directories are created with mode 0700 on first use. `llm-proxy logout`
-removes both files.
+Both directories are created with mode 0700 on first use. `llm-proxy logout` removes
+both files.
 
 ## Endpoints
 
@@ -155,10 +156,8 @@ backend's own credentials. Request bodies are capped at 8 MiB.
 ### Budget / quota reporting
 
 `/v1/usage/budget` is a proxy extension (no OpenAI counterpart) that surfaces
-the per-credential spend / ceiling for backends that expose one. Today only
-the IBM Bob backend implements it; see
-[`docs/providers/ibm-bob.md`](providers/ibm-bob.md#budget-reporting) for the
-upstream details and the meaning of each field.
+the per-credential spend / ceiling for backends that expose one. See each backend's
+documentation for details of each field.
 
 - `GET /v1/usage/budget` aggregates every backend that supports it. Backends
   that do not are silently skipped. If no registered backend supports
@@ -223,6 +222,7 @@ upstream details and the meaning of each field.
 **Token limits:**
 
 The `token_limits` object contains:
+
 - `max_input_tokens`: Maximum tokens allowed in input (prompt)
 - `max_output_tokens`: Maximum tokens model will generate in response
 - `max_context_tokens`: Total context window size (input + output)
@@ -231,6 +231,7 @@ The `token_limits` object contains:
 
 For models with the `reasoning` capability, `reasoning_effort_levels` lists
 supported effort values for the `/v1/responses` endpoint:
+
 - `minimal`: Minimal reasoning, fastest response (GPT-5 family)
 - `low`: Faster response with less reasoning depth
 - `medium`: Balanced response time and reasoning quality
@@ -260,11 +261,11 @@ base model.
 Every request must include a `model` field of the form
 `"<backend-prefix>/<provider-model-id>"`. Examples:
 
-| Client sends                 | Routed to        | Forwarded model       |
-| ---------------------------- | ---------------- | --------------------- |
-| `copilot/gpt-4o`             | `copilot`        | `gpt-4o`              |
-| `copilot/claude-3.5`         | `copilot`        | `claude-3.5`          |
-| `openai/openai/gpt-oss-120b` | `openai`         | `openai/gpt-oss-120b` |
+| Client sends                     | Routed to        | Forwarded model       |
+| -------------------------------- | ---------------- | --------------------- |
+| `copilot/gpt-4o`                 | `copilot`        | `gpt-4o`              |
+| `copilot/claude-3.5`             | `copilot`        | `claude-3.5`          |
+| `openrouter/openai/gpt-oss-120b` | `openrouter`     | `openai/gpt-oss-120b` |
 
 Only the first `/` is significant: characters before it select the backend,
 and everything after it (including any further `/` characters) is forwarded

@@ -1,11 +1,8 @@
 # LLM Proxy
 
-An authenticating OpenAI-compatible HTTP proxy that fronts pluggable LLM
-backends. Clients talk to `llm-proxy` exactly as they would talk to the OpenAI
-API; the proxy strips the client's `Authorization` header, picks an upstream
-provider based on the requested model, injects the provider's own credentials,
-and forwards the request (streaming preserved). All responses are transformed
-to strict OpenAI API specification compliance.
+An authenticating proxy, exposing OpenAI-compatible API to front pluggable LLM backends.
+The proxy is intended to run on the same machine as coding agents using it, stripping
+any `Authorization` headers sent to it and injecting its own for each upstream provider.
 
 Currently supported backends:
 
@@ -17,28 +14,19 @@ Currently supported backends:
 
 - **OpenAI API Compliance**: All backend responses are transformed to match the
   OpenAI API specification exactly, ensuring compatibility with any OpenAI client.
-- **OpenAI-compatible endpoints**:
-  - `/v1/chat/completions` - Chat completions (SSE streaming supported)
-  - `/v1/completions` - Legacy text completions
-  - `/v1/embeddings` - Text embeddings
-  - `/v1/responses` - Unified response objects with reasoning effort support
-  - `/v1/models` - Aggregated model list (OpenAI spec format)
-  - `/v1/model/info` - Extended model metadata with capabilities, token limits, and reasoning effort levels
-  - `/v1/usage/budget` - Per-backend spend / quota (proxy extension; IBM Bob "Bobcoins" today)
-  - `/healthz` - Health check endpoint
-- HCL2 configuration: single file _or_ directory of `*.hcl` files; supports
-  `env("NAME")` interpolation so secrets never need to live on disk. The
-  config path comes from `-c` / `--config`, then `LLM_PROXY_CONFIG`, then
-  `/etc/llm-proxy/config.hcl` on non-Windows or
-  `C:/ProgramData/llm-proxy/config.hcl` on Windows.
-- Prefix-based model routing (e.g. `copilot/gpt-4o`) so multiple backends can
-  coexist in one proxy.
-- Mostly stateless. The only on-disk state is the GitHub OAuth token written
-  by `llm-proxy login` (config dir, mode 0600) and the short-lived Copilot
-  API token cache (cache dir, mode 0600).
-- Secure defaults: binds to `127.0.0.1:4980`, refuses to silently default a
-  backend, enforces request body size limits, never logs request bodies or
-  tokens.
+- HCL2 configuration:
+  - single file _or_ directory of `*.hcl` files
+  - supports `env("NAME")` interpolation so secrets never need to live on disk
+- Prefix-based model routing (e.g. `copilot/gpt-4o`) so multiple backends can coexist
+  in one proxy.
+- Secure defaults:
+  - binds to `127.0.0.1:4980`
+  - refuses to silently default a backend
+  - enforces request body size limits
+  - never logs request bodies or tokens, unless explicitly enabled (troubleshooting)
+- Mostly stateless. Minimal state is preserved on-disk:
+  - GitHub OAuth token (required for GitHub Copilot)
+  - Short-lived, Copilot API token (required for GitHub Copilot)
 
 ## Quick start
 
@@ -64,6 +52,8 @@ See [`docs/configuration.md`](docs/configuration.md) for the full HCL schema.
 ## Advanced Features
 
 ### Reasoning Models and /v1/responses
+
+**WARNING:** Experimental
 
 The `/v1/responses` endpoint provides unified response objects with reasoning
 effort support for models like OpenAI o1 and o3:
@@ -92,6 +82,7 @@ curl http://127.0.0.1:4980/v1/model/info
 ```
 
 This helps clients discover which models support features like:
+
 - `chat` - Chat completion API
 - `tools` - Function calling
 - `vision` - Image inputs
@@ -120,22 +111,27 @@ your config contains `backend "bob" { type = "ibm-bob" ... }`. Add
 provider-specific extras) under each id, or `--json` for a machine-readable
 dump.
 
+This command explicitly ignores the `models = []` config so the operator can
+determine what models are available. This allows them to populate the allowlist.
+
 For the GitHub Copilot backend, models the upstream marks as
 `policy.state = "disabled"` are omitted.
 
 ## Building
 
 `task build` compiles for the current platform; `task build:all` cross-compiles
-for Linux, macOS, and Windows on both `amd64` and `arm64`. `CGO_ENABLED=0` is
-enforced.
+for the following supported platforms and architectures:
+
+- `linux` (`amd64`, `arm64`)
+- `darwin` (`amd64`, `arm64`)
+- `windows` (`amd64`, `arm64`)
 
 ```sh
 task build         # bin/llm-proxy for host platform
 task build:all     # dist/llm-proxy-<os>-<arch>[.exe] for all supported targets
 ```
 
-Supported platforms: Linux, macOS, Windows. Supported architectures: amd64,
-arm64.
+In all cases, CGO is disabled for maximum compatibility. (`CGO_ENABLED=0`)
 
 ## Testing
 

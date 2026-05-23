@@ -35,6 +35,7 @@ backend "bob" {
 
   # Required when the resolved key targets the modern (authn) backend -
   # i.e. anything other than an sk-/pk- legacy key. Wrap in env().
+  # See: `llm-proxy ibm-bob extract --help`
   hmac_secret = env("BOB_HMAC_SECRET")
   user_agent  = "bobshell/${env("BOB_VERSION")}"
 
@@ -75,8 +76,8 @@ Output (JSON form):
 
 ```json
 {
-  "build_time_hmac_secret": "c102b927-013e-42e4-bc65-16625f35807a",
-  "version": "1.0.4"
+  "build_time_hmac_secret": "c102b927-013e-42e4-bc95-16125f35807a",
+  "version": "1.0.2"
 }
 ```
 
@@ -150,8 +151,6 @@ Bob-specific details:
   the Copilot provider uses, so the supported subset and explicit
   non-goals — no `previous_response_id`, no built-in tools, no
   retrieval — are identical.
-
-
 
 For each call the proxy sets:
 
@@ -284,7 +283,7 @@ Sample output for a single backend:
   backend, which does not expose `/admin/v1/profile`; the proxy returns
   `501 Not Implemented` in that case.
 - **No caching.** Every call hits the upstream. This is by design so
-  `/bobcoins`-style slash commands feel live to the user. If you wrap this
+  `/llm-budget`-style slash commands feel live to the user. If you wrap this
   with a slash command in opencode, run it sparingly and avoid embedding it
   in tight automation loops.
 - **`unlimited: true` overrides the numbers.** When the upstream returns
