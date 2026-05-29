@@ -21,10 +21,24 @@ type ChatCompletionChoice struct {
 	Logprobs     *Logprobs `json:"logprobs,omitempty"`
 }
 
-// Message represents a chat message with role and content.
+// ToolCallFunction holds the function name and arguments for a tool call.
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// ToolCall represents a single tool call issued by the model.
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+// Message represents a chat message with role, content, and optional tool calls.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // CompletionResponse represents an OpenAI text completion response.

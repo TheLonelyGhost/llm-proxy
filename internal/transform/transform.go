@@ -76,6 +76,16 @@ func TransformChatResponse(statusCode int, body io.ReadCloser, stream bool, mode
 		finishReason := getStringPtr(choice, "finish_reason")
 		message := extractMessage(choice, "message")
 
+		// Normalize a broken upstream state: some backends (e.g. GitHub Copilot)
+		// return finish_reason="tool_calls" without including a tool_calls array in
+		// the message when the model decides voluntarily (no tool_choice forcing).
+		// A valid OpenAI response with finish_reason="tool_calls" MUST include
+		// tool_calls; without them the client cannot proceed. Downgrade to "stop".
+		if finishReason != nil && *finishReason == "tool_calls" && (message == nil || len(message.ToolCalls) == 0) {
+			stop := "stop"
+			finishReason = &stop
+		}
+
 		transformed.Choices = append(transformed.Choices, ChatCompletionChoice{
 			Index:        int(getInt64Or(choice, "index", 0)),
 			Message:      message,
@@ -442,10 +452,28 @@ func getStringPtr(m map[string]any, key string) *string {
 func extractMessage(choice map[string]any, key string) *Message {
 	if v, ok := choice[key]; ok {
 		if msg, ok := v.(map[string]any); ok {
-			return &Message{
+			m := &Message{
 				Role:    getStringOr(msg, "role", "assistant"),
 				Content: getStringOr(msg, "content", ""),
 			}
+			if tcs, ok := msg["tool_calls"].([]any); ok {
+				for _, tc := range tcs {
+					tcMap, ok := tc.(map[string]any)
+					if !ok {
+						continue
+					}
+					fnMap, _ := tcMap["function"].(map[string]any)
+					m.ToolCalls = append(m.ToolCalls, ToolCall{
+						ID:   getStringOr(tcMap, "id", ""),
+						Type: getStringOr(tcMap, "type", "function"),
+						Function: ToolCallFunction{
+							Name:      getStringOr(fnMap, "name", ""),
+							Arguments: getStringOr(fnMap, "arguments", "{}"),
+						},
+					})
+				}
+			}
+			return m
 		}
 	}
 	return nil

@@ -160,6 +160,92 @@ func TestTransformChatResponse(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:       "finish_reason tool_calls with tool_calls present — preserved",
+			statusCode: 200,
+			responseBody: `{
+				"id": "chatcmpl-tc1",
+				"object": "chat.completion",
+				"created": 1677652288,
+				"model": "gpt-4",
+				"choices": [{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						"content": "",
+						"tool_calls": [{
+							"id": "call_abc123",
+							"type": "function",
+							"function": {
+								"name": "add",
+								"arguments": "{\"a\":3,\"b\":4}"
+							}
+						}]
+					},
+					"finish_reason": "tool_calls"
+				}],
+				"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+			}`,
+			modelPrefix: "copilot/claude-sonnet",
+			stream:      false,
+			wantStatus:  200,
+			wantErr:     false,
+			validate: func(t *testing.T, result *TransformResult) {
+				body, _ := io.ReadAll(result.Body)
+				var resp ChatCompletionResponse
+				if err := json.Unmarshal(body, &resp); err != nil {
+					t.Fatalf("failed to unmarshal: %v", err)
+				}
+				if *resp.Choices[0].FinishReason != "tool_calls" {
+					t.Errorf("expected finish_reason=tool_calls, got %s", *resp.Choices[0].FinishReason)
+				}
+				if len(resp.Choices[0].Message.ToolCalls) != 1 {
+					t.Fatalf("expected 1 tool call, got %d", len(resp.Choices[0].Message.ToolCalls))
+				}
+				if resp.Choices[0].Message.ToolCalls[0].Function.Name != "add" {
+					t.Errorf("expected tool name=add, got %s", resp.Choices[0].Message.ToolCalls[0].Function.Name)
+				}
+			},
+		},
+		{
+			name:       "finish_reason tool_calls with missing tool_calls — normalized to stop",
+			statusCode: 200,
+			responseBody: `{
+				"id": "chatcmpl-tc2",
+				"object": "chat.completion",
+				"created": 1677652288,
+				"model": "gpt-4",
+				"choices": [{
+					"index": 0,
+					"message": {
+						"role": "assistant",
+						"content": "Sure! Let me add those numbers for you."
+					},
+					"finish_reason": "tool_calls"
+				}],
+				"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+			}`,
+			modelPrefix: "copilot/claude-sonnet",
+			stream:      false,
+			wantStatus:  200,
+			wantErr:     false,
+			validate: func(t *testing.T, result *TransformResult) {
+				body, _ := io.ReadAll(result.Body)
+				var resp ChatCompletionResponse
+				if err := json.Unmarshal(body, &resp); err != nil {
+					t.Fatalf("failed to unmarshal: %v", err)
+				}
+				if *resp.Choices[0].FinishReason != "stop" {
+					t.Errorf("expected finish_reason=stop (normalized), got %s", *resp.Choices[0].FinishReason)
+				}
+				if resp.Choices[0].Message.Content != "Sure! Let me add those numbers for you." {
+					t.Errorf("content was unexpectedly modified: %s", resp.Choices[0].Message.Content)
+				}
+				if len(resp.Choices[0].Message.ToolCalls) != 0 {
+					t.Errorf("expected no tool calls, got %d", len(resp.Choices[0].Message.ToolCalls))
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
