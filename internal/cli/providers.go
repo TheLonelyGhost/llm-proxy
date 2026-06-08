@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sort"
@@ -67,7 +68,7 @@ func newProvidersListModelsCmd(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := buildBackend(*block, tracenoop.NewTracerProvider().Tracer("providers"))
+			b, err := buildBackend(*block, slog.Default(), cfg.Server.LogBodies, tracenoop.NewTracerProvider().Tracer("providers"))
 			if err != nil {
 				return fmt.Errorf("init backend %q: %w", block.Name, err)
 			}

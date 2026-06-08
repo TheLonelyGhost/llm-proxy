@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -547,11 +548,8 @@ func (s *chatToResponsesStream) fillFromUpstream() error {
 
 	var chunk map[string]any
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-		// Drop malformed upstream events; never crash the stream. The error
-		// is deliberately swallowed (intentionally returning nil despite a
-		// non-nil err).
-		_ = err
-		return nil //nolint:nilerr // see comment above
+		slog.Default().Debug("malformed upstream chat stream chunk, dropping", "err", err)
+		return nil
 	}
 
 	if !s.emittedCreated {
@@ -860,6 +858,7 @@ func (s *chatToResponsesStream) buildFinalOutput() []map[string]any {
 func (s *chatToResponsesStream) writeEvent(name string, data map[string]any) {
 	encoded, err := json.Marshal(data)
 	if err != nil {
+		slog.Default().Debug("failed to encode Responses stream event", "event", name, "err", err)
 		return
 	}
 	s.outbound.WriteString("event: ")

@@ -25,6 +25,7 @@ import (
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/httplog"
 	"github.com/thelonelyghost/llm-proxy/internal/responsesshim"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -131,6 +132,8 @@ type Options struct {
 	// device-code poll intervals. Intended for tests; zero leaves the
 	// default of time.Second in place.
 	IntervalUnit time.Duration
+	Logger       *slog.Logger // nil defaults to slog.Default()
+	LogBodies    bool
 	Tracer       trace.Tracer
 }
 
@@ -162,6 +165,15 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
+
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if logger.Enabled(context.Background(), slog.LevelDebug) {
+		httplog.WrapClient(client, logger, opts.LogBodies)
+	}
+
 	tracer := opts.Tracer
 	if tracer == nil {
 		tracer = tracenoop.NewTracerProvider().Tracer(Type)
@@ -194,7 +206,7 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		models:   models,
 		auth:     auth,
 		http:     client,
-		logger:   slog.Default(),
+		logger:   logger,
 		tracer:   tracer,
 	}, nil
 }

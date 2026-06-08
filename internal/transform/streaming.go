@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 )
 
@@ -90,7 +91,7 @@ func (st *StreamTransformer) Read(p []byte) (n int, err error) {
 
 	raw := make(map[string]any)
 	if err := json.Unmarshal([]byte(data), &raw); err != nil {
-		// Skip malformed events rather than failing the stream
+		slog.Default().Debug("malformed SSE chat event, skipping", "err", err, "data_len", len(data))
 		return st.Read(p)
 	}
 
@@ -99,7 +100,7 @@ func (st *StreamTransformer) Read(p []byte) (n int, err error) {
 
 	transformed, err := json.Marshal(raw)
 	if err != nil {
-		// Skip events that can't be marshaled
+		slog.Default().Debug("failed to marshal transformed SSE event, skipping", "err", err)
 		return st.Read(p)
 	}
 
@@ -259,7 +260,7 @@ func (rt *responsesStreamTransformer) Read(p []byte) (int, error) {
 	// Try to JSON-parse the data; if it parses, rewrite `response.model`.
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(dataPayload), &raw); err != nil {
-		// Malformed payload — forward as-is so we don't silently drop it.
+		slog.Default().Debug("malformed Responses SSE payload, forwarding verbatim", "err", err, "data_len", len(dataPayload))
 		return rt.write(p, block+"\n\n")
 	}
 
@@ -271,6 +272,7 @@ func (rt *responsesStreamTransformer) Read(p []byte) (int, error) {
 
 	encoded, err := json.Marshal(raw)
 	if err != nil {
+		slog.Default().Debug("failed to marshal transformed Responses SSE event, forwarding verbatim", "err", err)
 		return rt.write(p, block+"\n\n")
 	}
 

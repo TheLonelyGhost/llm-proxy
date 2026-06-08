@@ -26,6 +26,7 @@ import (
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/httplog"
 	"github.com/thelonelyghost/llm-proxy/internal/responsesshim"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -140,6 +141,8 @@ type Options struct {
 	Name        string
 	Models      []string
 	HTTPClient  *http.Client
+	Logger      *slog.Logger // nil defaults to slog.Default()
+	LogBodies   bool
 	IdentityTTL time.Duration
 	Now         func() time.Time
 	Tracer      trace.Tracer
@@ -181,6 +184,14 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		client = &http.Client{Timeout: timeout}
 	}
 
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if logger.Enabled(context.Background(), slog.LevelDebug) {
+		httplog.WrapClient(client, logger, opts.LogBodies)
+	}
+
 	name := opts.Name
 	if name == "" {
 		name = block.Name
@@ -207,7 +218,7 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		settings:     s,
 		models:       models,
 		client:       client,
-		logger:       slog.Default(),
+		logger:       logger,
 		tracer:       tracer,
 		keyKind:      kind,
 		baseURL:      baseURL,

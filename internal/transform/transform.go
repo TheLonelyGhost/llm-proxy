@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
@@ -45,11 +46,13 @@ func TransformChatResponse(statusCode int, body io.ReadCloser, stream bool, mode
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
+		slog.Default().Debug("upstream chat response is not valid JSON", "err", err)
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned invalid JSON")
 	}
 
 	choices, ok := raw["choices"]
 	if !ok {
+		slog.Default().Debug("upstream chat response missing choices field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response missing required field: choices")
 	}
 
@@ -64,6 +67,7 @@ func TransformChatResponse(statusCode int, body io.ReadCloser, stream bool, mode
 
 	choicesArray, ok := choices.([]any)
 	if !ok {
+		slog.Default().Debug("upstream chat response has non-array choices field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response has invalid choices field")
 	}
 
@@ -129,11 +133,13 @@ func TransformCompletionResponse(statusCode int, body io.ReadCloser, stream bool
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
+		slog.Default().Debug("upstream completion response is not valid JSON", "err", err)
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned invalid JSON")
 	}
 
 	choices, ok := raw["choices"]
 	if !ok {
+		slog.Default().Debug("upstream completion response missing choices field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response missing required field: choices")
 	}
 
@@ -148,6 +154,7 @@ func TransformCompletionResponse(statusCode int, body io.ReadCloser, stream bool
 
 	choicesArray, ok := choices.([]any)
 	if !ok {
+		slog.Default().Debug("upstream completion response has non-array choices field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response has invalid choices field")
 	}
 
@@ -195,11 +202,13 @@ func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix 
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
+		slog.Default().Debug("upstream embedding response is not valid JSON", "err", err)
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned invalid JSON")
 	}
 
 	dataField, ok := raw["data"]
 	if !ok {
+		slog.Default().Debug("upstream embedding response missing data field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response missing required field: data")
 	}
 
@@ -216,6 +225,7 @@ func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix 
 
 	dataArray, ok := dataField.([]any)
 	if !ok {
+		slog.Default().Debug("upstream embedding response has non-array data field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response has invalid data field")
 	}
 
@@ -232,6 +242,7 @@ func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix 
 
 		embeddingArray, ok := embeddingField.([]any)
 		if !ok || len(embeddingArray) == 0 {
+			slog.Default().Debug("upstream embedding response has empty or non-array vector")
 			return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned invalid embedding: empty or non-array vector")
 		}
 
@@ -245,6 +256,7 @@ func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix 
 			case int64:
 				embedding = append(embedding, float64(num))
 			default:
+				slog.Default().Debug("upstream embedding response has non-numeric vector values")
 				return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned invalid embedding: non-numeric values")
 			}
 		}
@@ -292,9 +304,11 @@ func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool,
 
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
+		slog.Default().Debug("upstream responses response is not valid JSON", "err", err)
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned invalid JSON")
 	}
 	if raw == nil {
+		slog.Default().Debug("upstream responses response is empty JSON object")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned empty JSON object")
 	}
 
@@ -316,6 +330,7 @@ func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool,
 
 	choices, ok := raw["choices"]
 	if !ok {
+		slog.Default().Debug("upstream responses response missing choices field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response missing required field: choices")
 	}
 
@@ -330,6 +345,7 @@ func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool,
 
 	choicesArray, ok := choices.([]any)
 	if !ok {
+		slog.Default().Debug("upstream responses response has non-array choices field")
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream response has invalid choices field")
 	}
 

@@ -447,18 +447,25 @@ func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Resp
 	if err != nil {
 		switch {
 		case errors.Is(err, backend.ErrUnsupported):
+			s.logger.Info("backend does not support this operation", "model", modelPrefix, "err", err)
 			writeAPIError(w, http.StatusNotImplemented, "not_implemented", err.Error())
 		case errors.Is(err, backend.ErrUnknownModel):
+			s.logger.Info("model not found in backend allow-list", "model", modelPrefix, "err", err)
 			writeAPIError(w, http.StatusNotFound, "invalid_request_error", err.Error())
 		default:
-			s.logger.Error("backend error", "err", err)
+			s.logger.Error("backend request failed", "model", modelPrefix, "err", err)
 			writeAPIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 		}
 		return
 	}
 	if resp == nil {
+		s.logger.Error("backend returned nil response", "model", modelPrefix)
 		writeAPIError(w, http.StatusBadGateway, "upstream_error", "empty response from backend")
 		return
+	}
+
+	if resp.StatusCode >= 400 {
+		s.logger.Info("upstream returned error status", "model", modelPrefix, "status", resp.StatusCode)
 	}
 
 	var transformed *transform.TransformResult
@@ -474,12 +481,13 @@ func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Resp
 	case endpointResponses:
 		transformed, transformErr = transform.TransformResponsesResponse(resp.StatusCode, resp.Body, stream, modelPrefix)
 	default:
+		s.logger.Error("unknown endpoint type in writeUpstreamResponse", "type", epType)
 		writeAPIError(w, http.StatusInternalServerError, "internal_error", "unknown endpoint type")
 		return
 	}
 
 	if transformErr != nil {
-		s.logger.Error("transformation error", "err", transformErr)
+		s.logger.Error("response transformation failed", "model", modelPrefix, "status", resp.StatusCode, "err", transformErr)
 		writeAPIError(w, http.StatusBadGateway, "upstream_error", "failed to transform backend response")
 		return
 	}

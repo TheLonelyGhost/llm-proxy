@@ -71,7 +71,7 @@ func newServeCmd(out io.Writer) *cobra.Command {
 			}
 
 			reg := backend.NewRegistry()
-			if err := registerBackends(cfg, reg, telemetry.Tracer("providers")); err != nil {
+			if err := registerBackends(cfg, reg, logger, telemetry.Tracer("providers")); err != nil {
 				return err
 			}
 			if len(reg.Names()) == 0 {
@@ -117,9 +117,10 @@ func newServeCmd(out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func registerBackends(cfg *config.Config, reg *backend.Registry, tracer trace.Tracer) error {
+func registerBackends(cfg *config.Config, reg *backend.Registry, logger *slog.Logger, tracer trace.Tracer) error {
+	logBodies := cfg.Server.LogBodies
 	for _, b := range cfg.Backends {
-		p, err := buildBackend(b, tracer)
+		p, err := buildBackend(b, logger, logBodies, tracer)
 		if err != nil {
 			return fmt.Errorf("init backend %q: %w", b.Name, err)
 		}
@@ -133,14 +134,14 @@ func registerBackends(cfg *config.Config, reg *backend.Registry, tracer trace.Tr
 // buildBackend instantiates the concrete provider for a BackendBlock. It is
 // the single source of truth for the type->constructor mapping so the
 // `serve` and `providers list-models` commands stay in sync.
-func buildBackend(b config.BackendBlock, tracer trace.Tracer) (backend.Backend, error) {
+func buildBackend(b config.BackendBlock, logger *slog.Logger, logBodies bool, tracer trace.Tracer) (backend.Backend, error) {
 	switch b.Type {
 	case copilot.Type:
-		return copilot.New(b, copilot.Options{Name: b.Name, Models: b.Models, Tracer: tracer})
+		return copilot.New(b, copilot.Options{Name: b.Name, Models: b.Models, Logger: logger, LogBodies: logBodies, Tracer: tracer})
 	case ibmbob.Type:
-		return ibmbob.New(b, ibmbob.Options{Name: b.Name, Models: b.Models, Tracer: tracer})
+		return ibmbob.New(b, ibmbob.Options{Name: b.Name, Models: b.Models, Logger: logger, LogBodies: logBodies, Tracer: tracer})
 	case openai.Type:
-		return openai.New(b, openai.Options{Name: b.Name, Models: b.Models, Tracer: tracer})
+		return openai.New(b, openai.Options{Name: b.Name, Models: b.Models, Logger: logger, LogBodies: logBodies, Tracer: tracer})
 	default:
 		return nil, fmt.Errorf("backend %q: unknown type %q", b.Name, b.Type)
 	}
