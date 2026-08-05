@@ -724,12 +724,134 @@ func TestTransformResponsesResponse(t *testing.T) {
 			wantStatus:  200,
 			wantErr:     false,
 		},
+		{
+			// Native Responses API shape (top-level `output` array) must be
+			// fully re-normalised, not passed through with only a model rewrite.
+			// ADR-0005: the pass-through was unintentional.
+			name:       "native responses shape is fully re-normalised with qualified model id",
+			statusCode: 200,
+			responseBody: `{
+				"id": "resp-native-1",
+				"object": "response",
+				"created_at": 1677652288,
+				"status": "completed",
+				"model": "o1",
+				"output": [{
+					"type": "message",
+					"id": "msg-1",
+					"status": "completed",
+					"role": "assistant",
+					"content": [{"type": "output_text", "text": "Hello", "annotations": []}]
+				}],
+				"usage": {
+					"input_tokens": 10,
+					"output_tokens": 5,
+					"total_tokens": 15
+				}
+			}`,
+			modelPrefix: "openai/o1",
+			stream:      false,
+			wantStatus:  200,
+			wantErr:     false,
+			validate: func(t *testing.T, result *TransformResult) {
+				body, _ := io.ReadAll(result.Body)
+				var raw map[string]any
+				if err := json.Unmarshal(body, &raw); err != nil {
+					t.Fatalf("failed to unmarshal response: %v", err)
+				}
+				// model must be the Qualified Model ID, not the upstream canonical id
+				if raw["model"] != "openai/o1" {
+					t.Errorf("expected model=openai/o1, got %v", raw["model"])
+				}
+				// id must be preserved from upstream
+				if raw["id"] != "resp-native-1" {
+					t.Errorf("expected id=resp-native-1, got %v", raw["id"])
+				}
+				// object must be normalised to "response"
+				if raw["object"] != "response" {
+					t.Errorf("expected object=response, got %v", raw["object"])
+				}
+				// upstream uses created_at; normalised output must preserve created_at (OpenAI spec)
+				if _, hasCreatedAt := raw["created_at"]; !hasCreatedAt {
+					t.Error("normalised response must have a \"created_at\" field")
+				}
+				if _, hasCreated := raw["created"]; hasCreated {
+					t.Error("normalised response must use \"created_at\", not \"created\"")
+				}
+				// output array must be present and intact
+				output, ok := raw["output"].([]any)
+				if !ok || len(output) != 1 {
+					t.Fatalf("expected output array with 1 item, got %v", raw["output"])
+				}
+				item, ok := output[0].(map[string]any)
+				if !ok {
+					t.Fatal("expected output[0] to be an object")
+				}
+				if item["type"] != "message" {
+					t.Errorf("expected output[0].type=message, got %v", item["type"])
+				}
+				// must NOT contain leftover upstream fields like `choices` or `status`
+				if _, hasChoices := raw["choices"]; hasChoices {
+					t.Error("normalised response must not contain a \"choices\" field")
+				}
+				if _, hasStatus := raw["status"]; hasStatus {
+					t.Error("normalised response must not contain a raw upstream \"status\" field")
+				}
+			},
+		},
+		{
+			// A native Responses shape with an empty output array must also be
+			// fully re-normalised, not passed through.
+			name:       "native responses shape with empty output array is re-normalised",
+			statusCode: 200,
+			responseBody: `{
+				"id": "resp-native-2",
+				"object": "response",
+				"created_at": 1677652288,
+				"status": "completed",
+				"model": "o1",
+				"output": []
+			}`,
+			modelPrefix: "openai/o1",
+			stream:      false,
+			wantStatus:  200,
+			wantErr:     false,
+			validate: func(t *testing.T, result *TransformResult) {
+				body, _ := io.ReadAll(result.Body)
+				var raw map[string]any
+				if err := json.Unmarshal(body, &raw); err != nil {
+					t.Fatalf("failed to unmarshal response: %v", err)
+				}
+				if raw["model"] != "openai/o1" {
+					t.Errorf("expected model=openai/o1, got %v", raw["model"])
+				}
+				if raw["id"] != "resp-native-2" {
+					t.Errorf("expected id=resp-native-2, got %v", raw["id"])
+				}
+				output, ok := raw["output"].([]any)
+				if !ok {
+					t.Fatalf("expected output array, got %v", raw["output"])
+				}
+				if len(output) != 0 {
+					t.Errorf("expected empty output array, got %d items", len(output))
+				}
+				if _, hasChoices := raw["choices"]; hasChoices {
+					t.Error("normalised response must not contain a \"choices\" field")
+				}
+				if _, hasCreatedAt := raw["created_at"]; !hasCreatedAt {
+					t.Error("normalised response must have a \"created_at\" field")
+				}
+				if _, hasCreated := raw["created"]; hasCreated {
+					t.Error("normalised response must use \"created_at\", not \"created\"")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := io.NopCloser(strings.NewReader(tt.responseBody))
-			result, err := TransformResponsesResponse(tt.statusCode, body, tt.stream, tt.modelPrefix)
+			result, err := TransformResponsesResponse(tt.statusCode, body, tt.stream, tt.modelPrefix, nil)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("TransformResponsesResponse() error = %v, wantErr %v", err, tt.wantErr)
@@ -865,5 +987,50 @@ func TestMapStatusToErrorType(t *testing.T) {
 				t.Errorf("mapStatusToErrorType(%d) = %s, want %s", tt.statusCode, got, tt.wantType)
 			}
 		})
+	}
+}
+
+// TestTransformResponsesResponse_ShimPassThrough verifies that when the upstream
+// backend already set Content-Type: text/event-stream on a streaming response
+// (i.e. it used the responsesshim and produced Responses-API named events),
+// TransformResponsesResponse forwards the body verbatim without re-encoding.
+func TestTransformResponsesResponse_ShimPassThrough(t *testing.T) {
+	// A pre-translated stream that carries sequence_number and logprobs —
+	// fields that a re-encoding pass would silently strip.
+	upstreamBody := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_x","object":"response","created_at":1700000000,"status":"in_progress","model":"copilot/gpt-4o","output":[]}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_x","output_index":0,"content_index":0,"delta":"Hi","logprobs":[]}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_x","object":"response","created_at":1700000000,"status":"completed","model":"copilot/gpt-4o","output":[]}}`,
+		``,
+	}, "\n")
+
+	upstreamHeader := http.Header{"Content-Type": []string{"text/event-stream"}}
+	body := io.NopCloser(strings.NewReader(upstreamBody))
+	result, err := TransformResponsesResponse(200, body, true, "copilot/gpt-4o", upstreamHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", result.StatusCode)
+	}
+
+	out, _ := io.ReadAll(result.Body)
+	outStr := string(out)
+
+	// sequence_number and logprobs must survive verbatim.
+	if !strings.Contains(outStr, `"sequence_number":1`) {
+		t.Error("sequence_number:1 was stripped by transform layer")
+	}
+	if !strings.Contains(outStr, `"logprobs":[]`) {
+		t.Error("logprobs was stripped by transform layer")
+	}
+	// The body must reach the client unchanged (event names preserved).
+	if !strings.Contains(outStr, "response.output_text.delta") {
+		t.Error("event name response.output_text.delta missing from output")
 	}
 }

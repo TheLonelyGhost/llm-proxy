@@ -700,6 +700,21 @@ func TestHandleResponses_InvalidReasoningEffort(t *testing.T) {
 			shouldErr: false,
 		},
 		{
+			name:      "valid none",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"none"}}`,
+			shouldErr: false,
+		},
+		{
+			name:      "valid xhigh",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"xhigh"}}`,
+			shouldErr: false,
+		},
+		{
+			name:      "valid max",
+			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"max"}}`,
+			shouldErr: false,
+		},
+		{
 			name:      "invalid value",
 			reqBody:   `{"model":"openai/o1","input":"test","reasoning":{"effort":"ultra"}}`,
 			shouldErr: true,

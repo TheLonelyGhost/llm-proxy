@@ -154,6 +154,58 @@ func TestTranslateRequest_StreamSetsIncludeUsage(t *testing.T) {
 	}
 }
 
+func TestTranslateRequest_ReasoningEffortMappedToFlatField(t *testing.T) {
+	in := []byte(`{"model":"o3","input":"hi","reasoning":{"effort":"medium","summary":"auto"}}`)
+	out, _, _, err := TranslateRequest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chat map[string]any
+	_ = json.Unmarshal(out, &chat)
+	// Must map reasoning.effort to the flat reasoning_effort field.
+	if chat["reasoning_effort"] != "medium" {
+		t.Errorf("reasoning_effort = %v, want \"medium\"", chat["reasoning_effort"])
+	}
+	// Must NOT copy the reasoning object verbatim under the wrong key.
+	if _, bad := chat["reasoning"]; bad {
+		t.Errorf("chat[\"reasoning\"] present; should not be forwarded to /v1/chat/completions")
+	}
+	// reasoning.summary has no chat/completions equivalent; must be dropped.
+	if _, bad := chat["summary"]; bad {
+		t.Errorf("chat[\"summary\"] leaked into output")
+	}
+}
+
+func TestTranslateRequest_ReasoningAbsent(t *testing.T) {
+	in := []byte(`{"model":"gpt-4o","input":"hi"}`)
+	out, _, _, err := TranslateRequest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chat map[string]any
+	_ = json.Unmarshal(out, &chat)
+	if _, present := chat["reasoning_effort"]; present {
+		t.Errorf("reasoning_effort present when no reasoning in input")
+	}
+	if _, present := chat["reasoning"]; present {
+		t.Errorf("reasoning present when no reasoning in input")
+	}
+}
+
+func TestTranslateRequest_ReasoningEffortOmitted(t *testing.T) {
+	// reasoning object present but effort sub-field is absent or empty.
+	in := []byte(`{"model":"o3","input":"hi","reasoning":{"summary":"auto"}}`)
+	out, _, _, err := TranslateRequest(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chat map[string]any
+	_ = json.Unmarshal(out, &chat)
+	if _, present := chat["reasoning_effort"]; present {
+		t.Errorf("reasoning_effort present when effort sub-field absent")
+	}
+}
+
 func TestTranslateRequest_InstructionsPrependSystem(t *testing.T) {
 	in := []byte(`{"model":"gpt-4o","instructions":"Be brief.","input":"Hi"}`)
 	out, _, _, _ := TranslateRequest(in)
@@ -449,5 +501,168 @@ func TestStreamTranslator_ToolCallDeltas(t *testing.T) {
 	_ = json.Unmarshal([]byte(blockData(blocks[5])), &done)
 	if done["arguments"] != `{"cmd":"ls"}` {
 		t.Errorf("aggregated arguments = %q", done["arguments"])
+	}
+	// name must be present in done event (required by spec)
+	if done["name"] != "bash" {
+		t.Errorf("name in done = %v, want \"bash\"", done["name"])
+	}
+}
+
+// --- Ticket 02: sequence_number, logprobs, name ---
+
+func TestStreamTranslator_SequenceNumberPresentAndIncreasing(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"id":"chatcmpl-sn","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		``,
+		`data: {"id":"chatcmpl-sn","choices":[{"index":0,"delta":{"content":"Hi"}}]}`,
+		``,
+		`data: {"id":"chatcmpl-sn","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: [DONE]`,
+		``, ``,
+	}, "\n")
+
+	body := io.NopCloser(strings.NewReader(upstream))
+	out := TranslateChatStreamToResponses(body, "copilot/gpt-4o")
+	defer out.Close()
+
+	blocks := readAllSSEBlocks(t, out)
+
+	// Every block must carry sequence_number.
+	var prev int64 = 0
+	for i, b := range blocks {
+		var d map[string]any
+		if err := json.Unmarshal([]byte(blockData(b)), &d); err != nil {
+			t.Fatalf("block %d: unmarshal failed: %v", i, err)
+		}
+		sn, ok := d["sequence_number"]
+		if !ok {
+			t.Errorf("block %d (%s): missing sequence_number", i, blockEventName(b))
+			continue
+		}
+		var cur int64
+		switch v := sn.(type) {
+		case float64:
+			cur = int64(v)
+		case int64:
+			cur = v
+		default:
+			t.Errorf("block %d: sequence_number has unexpected type %T", i, sn)
+			continue
+		}
+		if cur <= prev {
+			t.Errorf("block %d (%s): sequence_number %d not > previous %d", i, blockEventName(b), cur, prev)
+		}
+		prev = cur
+	}
+}
+
+func TestStreamTranslator_TextEventsHaveLogprobs(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"id":"chatcmpl-lp","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		``,
+		`data: {"id":"chatcmpl-lp","choices":[{"index":0,"delta":{"content":"Hi"}}]}`,
+		``,
+		`data: {"id":"chatcmpl-lp","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: [DONE]`,
+		``, ``,
+	}, "\n")
+
+	body := io.NopCloser(strings.NewReader(upstream))
+	out := TranslateChatStreamToResponses(body, "copilot/gpt-4o")
+	defer out.Close()
+
+	blocks := readAllSSEBlocks(t, out)
+	for _, b := range blocks {
+		ev := blockEventName(b)
+		if ev != "response.output_text.delta" && ev != "response.output_text.done" {
+			continue
+		}
+		var d map[string]any
+		_ = json.Unmarshal([]byte(blockData(b)), &d)
+		if _, ok := d["logprobs"]; !ok {
+			t.Errorf("event %s: missing logprobs field", ev)
+		}
+	}
+}
+
+// --- Ticket 03: ResponseUsage nested objects ---
+
+func TestTranslateChatCompletion_UsageHasNestedDetails(t *testing.T) {
+	raw := []byte(`{
+		"id":"chatcmpl-u","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}
+	}`)
+	out, err := TranslateChatCompletion(raw, "copilot/gpt-4o")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(out, &resp)
+	usage, ok := resp["usage"].(map[string]any)
+	if !ok {
+		t.Fatal("usage missing or not an object")
+	}
+	if _, ok := usage["input_tokens_details"]; !ok {
+		t.Error("usage missing input_tokens_details")
+	}
+	if _, ok := usage["output_tokens_details"]; !ok {
+		t.Error("usage missing output_tokens_details")
+	}
+	itd, _ := usage["input_tokens_details"].(map[string]any)
+	if _, ok := itd["cached_tokens"]; !ok {
+		t.Error("input_tokens_details missing cached_tokens")
+	}
+	if _, ok := itd["cache_write_tokens"]; !ok {
+		t.Error("input_tokens_details missing cache_write_tokens")
+	}
+	otd, _ := usage["output_tokens_details"].(map[string]any)
+	if _, ok := otd["reasoning_tokens"]; !ok {
+		t.Error("output_tokens_details missing reasoning_tokens")
+	}
+}
+
+func TestStreamTranslator_CompletedEventUsageHasNestedDetails(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"id":"chatcmpl-ud","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		``,
+		`data: {"id":"chatcmpl-ud","choices":[{"index":0,"delta":{"content":"ok"}}]}`,
+		``,
+		`data: {"id":"chatcmpl-ud","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		``,
+		`data: {"id":"chatcmpl-ud","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`,
+		``,
+		`data: [DONE]`,
+		``, ``,
+	}, "\n")
+
+	body := io.NopCloser(strings.NewReader(upstream))
+	out := TranslateChatStreamToResponses(body, "copilot/gpt-4o")
+	defer out.Close()
+
+	blocks := readAllSSEBlocks(t, out)
+	var completedBlock string
+	for _, b := range blocks {
+		if blockEventName(b) == "response.completed" {
+			completedBlock = b
+			break
+		}
+	}
+	if completedBlock == "" {
+		t.Fatal("no response.completed event")
+	}
+	var ev map[string]any
+	_ = json.Unmarshal([]byte(blockData(completedBlock)), &ev)
+	resp, _ := ev["response"].(map[string]any)
+	usage, ok := resp["usage"].(map[string]any)
+	if !ok {
+		t.Fatal("response.completed missing usage")
+	}
+	if _, ok := usage["input_tokens_details"]; !ok {
+		t.Error("usage missing input_tokens_details")
+	}
+	if _, ok := usage["output_tokens_details"]; !ok {
+		t.Error("usage missing output_tokens_details")
 	}
 }

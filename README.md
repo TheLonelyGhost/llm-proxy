@@ -53,24 +53,23 @@ See [`docs/configuration.md`](docs/configuration.md) for the full HCL schema.
 
 ### Reasoning Models and /v1/responses
 
-**WARNING:** Experimental
-
 The `/v1/responses` endpoint provides unified response objects with reasoning
-effort support for models like OpenAI o1 and o3:
+effort support for models like OpenAI o-series and GPT-5:
 
 ```sh
 curl http://127.0.0.1:4980/v1/responses \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "openai/o1-preview",
+    "model": "openai/o3",
     "input": "What is the meaning of life?",
     "reasoning": {"effort": "medium"}
   }'
 ```
 
-The `reasoning.effort` parameter accepts "low", "medium", or "high" to control
-the amount of reasoning tokens used. The response includes `reasoning_tokens`
-in the usage field.
+The `reasoning.effort` parameter accepts `"none"`, `"minimal"`, `"low"`,
+`"medium"` (default), `"high"`, `"xhigh"`, or `"max"` to control the amount
+of reasoning tokens used. The response includes a `usage` object with
+`input_tokens`, `output_tokens`, and `total_tokens`.
 
 ### Model Capability Discovery
 

@@ -61,11 +61,16 @@ func TranslateRequest(raw []byte) (chatBody []byte, model string, stream bool, e
 		chat["max_tokens"] = v
 	}
 
-	// reasoning.effort is passed through verbatim: Copilot's chat surface
-	// ignores it on models that don't reason, and forwards it to the model
-	// otherwise. The proxy already validated the value.
+	// reasoning.effort is extracted and mapped to the flat reasoning_effort
+	// field that /v1/chat/completions expects. Other reasoning sub-fields
+	// (summary, mode, context) have no chat/completions equivalents and are
+	// dropped. The proxy has already validated the effort value.
 	if v, ok := req["reasoning"]; ok {
-		chat["reasoning"] = v
+		if obj, ok := v.(map[string]any); ok {
+			if effort, ok := obj["effort"]; ok {
+				chat["reasoning_effort"] = effort
+			}
+		}
 	}
 
 	messages, err := buildMessages(req)
@@ -397,8 +402,8 @@ func messageText(msg map[string]any) string {
 }
 
 func translateUsage(u map[string]any) map[string]any {
-	getInt := func(k string) int64 {
-		switch v := u[k].(type) {
+	getInt := func(src map[string]any, k string) int64 {
+		switch v := src[k].(type) {
 		case float64:
 			return int64(v)
 		case int64:
@@ -406,10 +411,27 @@ func translateUsage(u map[string]any) map[string]any {
 		}
 		return 0
 	}
+	// Extract reasoning_tokens from upstream completion_tokens_details if present.
+	var reasoningTokens int64
+	if ctd, ok := u["completion_tokens_details"].(map[string]any); ok {
+		reasoningTokens = getInt(ctd, "reasoning_tokens")
+	}
+	// Extract cached_tokens from upstream prompt_tokens_details if present.
+	var cachedTokens int64
+	if ptd, ok := u["prompt_tokens_details"].(map[string]any); ok {
+		cachedTokens = getInt(ptd, "cached_tokens")
+	}
 	return map[string]any{
-		"input_tokens":  getInt("prompt_tokens"),
-		"output_tokens": getInt("completion_tokens"),
-		"total_tokens":  getInt("total_tokens"),
+		"input_tokens":  getInt(u, "prompt_tokens"),
+		"output_tokens": getInt(u, "completion_tokens"),
+		"total_tokens":  getInt(u, "total_tokens"),
+		"input_tokens_details": map[string]any{
+			"cached_tokens":      cachedTokens,
+			"cache_write_tokens": int64(0),
+		},
+		"output_tokens_details": map[string]any{
+			"reasoning_tokens": reasoningTokens,
+		},
 	}
 }
 
@@ -465,6 +487,10 @@ type chatToResponsesStream struct {
 
 	finishReason string
 	done         bool
+
+	// seqNum is the monotonically-increasing sequence_number for SSE events
+	// (required by the OpenAI Responses API spec on every event).
+	seqNum int
 }
 
 func newSSEScanner(body io.Reader) *bufio.Scanner {
@@ -666,6 +692,7 @@ func (s *chatToResponsesStream) handleTextDelta(delta map[string]any) {
 		"output_index":  s.messageOutputIndex,
 		"content_index": 0,
 		"delta":         content,
+		"logprobs":      []any{},
 	})
 }
 
@@ -741,6 +768,7 @@ func (s *chatToResponsesStream) emitTerminalEvents() {
 			"type":         "response.function_call_arguments.done",
 			"item_id":      state.itemID,
 			"output_index": state.itemIndex,
+			"name":         state.name,
 			"arguments":    state.args.String(),
 		})
 		s.writeEvent("response.output_item.done", map[string]any{
@@ -766,6 +794,7 @@ func (s *chatToResponsesStream) emitTerminalEvents() {
 				"output_index":  s.messageOutputIndex,
 				"content_index": 0,
 				"text":          s.finalText.String(),
+				"logprobs":      []any{},
 			})
 			s.writeEvent("response.content_part.done", map[string]any{
 				"type":          "response.content_part.done",
@@ -856,6 +885,8 @@ func (s *chatToResponsesStream) buildFinalOutput() []map[string]any {
 }
 
 func (s *chatToResponsesStream) writeEvent(name string, data map[string]any) {
+	s.seqNum++
+	data["sequence_number"] = s.seqNum
 	encoded, err := json.Marshal(data)
 	if err != nil {
 		slog.Default().Debug("failed to encode Responses stream event", "event", name, "err", err)

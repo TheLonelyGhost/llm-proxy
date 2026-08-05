@@ -125,7 +125,8 @@ type EmbeddingRequest struct {
 // Reasoning holds optional reasoning parameters for /v1/responses requests.
 type Reasoning struct {
 	// Effort specifies the reasoning effort level. The proxy validates against
-	// OpenAI's published set ("minimal", "low", "medium", "high") before
+	// OpenAI's published set ("none", "minimal", "low", "medium", "high",
+	// "xhigh", "max") before
 	// dispatching to a backend.
 	Effort string
 }

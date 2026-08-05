@@ -340,9 +340,12 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		validEfforts := map[string]bool{"minimal": true, "low": true, "medium": true, "high": true}
+		validEfforts := map[string]bool{
+			"none": true, "minimal": true, "low": true,
+			"medium": true, "high": true, "xhigh": true, "max": true,
+		}
 		if !validEfforts[req.Reasoning.Effort] {
-			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "reasoning.effort must be one of \"minimal\", \"low\", \"medium\", or \"high\"")
+			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "reasoning.effort must be one of \"none\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", or \"max\"")
 			return
 		}
 	}
@@ -479,7 +482,7 @@ func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Resp
 	case endpointEmbedding:
 		transformed, transformErr = transform.TransformEmbeddingResponse(resp.StatusCode, resp.Body, modelPrefix)
 	case endpointResponses:
-		transformed, transformErr = transform.TransformResponsesResponse(resp.StatusCode, resp.Body, stream, modelPrefix)
+		transformed, transformErr = transform.TransformResponsesResponse(resp.StatusCode, resp.Body, stream, modelPrefix, resp.Header)
 	default:
 		s.logger.Error("unknown endpoint type in writeUpstreamResponse", "type", epType)
 		writeAPIError(w, http.StatusInternalServerError, "internal_error", "unknown endpoint type")

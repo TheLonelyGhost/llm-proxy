@@ -12,23 +12,25 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // ExtractedSecrets is the result of inspecting an installed bob binary or
-// bundle. It mirrors the JSON layout the reference Python helper writes.
+// bundle. It mirrors the JSON layout the reference helper writes.
 type ExtractedSecrets struct {
 	Version             string `json:"version"`
 	BuildTimeHMACSecret string `json:"build_time_hmac_secret"`
 }
 
-// markerStart and markerEnd bracket the encrypted secret block embedded in
-// every bob bundle. The marker UUID is the same constant the upstream
-// CLI uses (jQs in the minified source) and is intentionally a stable build
-// artifact - bumping the bob version does not change it.
-const (
-	markerStart = "/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:"
-	markerEnd   = " */"
-)
+// markerEnd closes every UUID-tagged block comment in the bob bundle.
+const markerEnd = " */"
+
+// markerRE matches the opening of any UUID-tagged block-comment payload
+// of the form "/* <uuid>:".  The UUID itself is not pinned: the reference
+// implementation (read-build-value.mjs) explicitly notes that it "may
+// change", so we identify payload blocks by structure rather than by a
+// fixed identifier.
+var markerRE = regexp.MustCompile(`/\*\s+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:`)
 
 // versionRE matches the Bob-Shell version literal that is embedded as a
 // User-Agent template in every bob bundle.
@@ -36,30 +38,28 @@ var versionRE = regexp.MustCompile(`Bob-Shell/(\d+\.\d+\.\d+)`)
 
 // ExtractErrors callers may want to distinguish for nicer CLI messages.
 var (
-	// ErrMarkerMissing is returned when the encrypted marker block is
-	// absent from the file - usually because the path does not actually
-	// point at a bob bundle.
+	// ErrMarkerMissing is returned when no UUID-tagged block-comment
+	// containing the requested encrypted entry is found in the file.
 	ErrMarkerMissing = errors.New("encrypted marker block not found")
 	// ErrVersionMissing is returned when the Bob-Shell/<version> literal
 	// cannot be located.
 	ErrVersionMissing = errors.New("Bob-Shell/<version> literal not found")
-	// ErrSecretMissing is returned when the marker JSON does not contain
-	// a BUILD_TIME_HMAC_SECRET entry.
-	ErrSecretMissing = errors.New("BUILD_TIME_HMAC_SECRET entry not found")
 )
 
 // Extract reads the bob bundle at path (which may be a symlink) and returns
 // the embedded version string and decrypted BUILD_TIME_HMAC_SECRET.
 //
-// Algorithm, mirroring jQs/QQs/e4n in the minified upstream bundle:
+// Algorithm mirrors scripts/read-build-value.mjs from pi-dangit-bobby:
 //
-//  1. Locate the last "/* fe5f39cc-...:" marker and its closing " */".
-//  2. Compute sha256 of the bundle with the entire marker block (including
-//     the trailing slash) stripped out. The first 32 bytes of that hex
-//     digest become the AES-256-CBC key.
-//  3. Parse the marker body as JSON (handling the JS-string-escaped form
-//     emitted by minifiers) and AES-256-CBC decrypt the
-//     BUILD_TIME_HMAC_SECRET entry using its embedded 16-byte IV.
+//  1. Scan all "/* <uuid>: … */" block-comment payloads; keep every one
+//     whose JSON (raw or with \" → " unescaping) contains both an
+//     "encrypted" field and an "iv" field for the requested key.
+//     Use the last such candidate, matching upstream DUn's lastIndexOf.
+//  2. Compute SHA-256 over the bundle with the candidate's block stripped
+//     out entirely (source[0..start] + source[end..]).  The raw 32-byte
+//     digest becomes the AES-256-CBC key.
+//  3. AES-256-CBC decrypt the ciphertext.  The IV may be a NodeBuffer
+//     ({type:"Buffer",data:[…]}) or a bare integer array.
 func Extract(path string) (ExtractedSecrets, error) {
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
@@ -73,17 +73,9 @@ func Extract(path string) (ExtractedSecrets, error) {
 	if err != nil {
 		return ExtractedSecrets{}, err
 	}
-	key, body, err := keyAndMarkerBody(string(data))
+	key, entry, err := findCandidate(string(data), "BUILD_TIME_HMAC_SECRET")
 	if err != nil {
 		return ExtractedSecrets{}, err
-	}
-	marker, err := parseMarkerJSON(body)
-	if err != nil {
-		return ExtractedSecrets{}, fmt.Errorf("parse marker JSON: %w", err)
-	}
-	entry, ok := marker["BUILD_TIME_HMAC_SECRET"]
-	if !ok {
-		return ExtractedSecrets{}, ErrSecretMissing
 	}
 	secret, err := decryptSecretEntry(entry, key)
 	if err != nil {
@@ -101,84 +93,111 @@ func extractVersion(data []byte) (string, error) {
 	return string(m[1]), nil
 }
 
-// keyAndMarkerBody locates the marker block, derives the AES-256-CBC key
-// from the marker-stripped bundle, and returns both the key bytes and the
-// raw marker body (the substring between markerStart and markerEnd).
-func keyAndMarkerBody(text string) ([]byte, string, error) {
-	r := strings.LastIndex(text, markerStart)
-	if r < 0 {
-		return nil, "", ErrMarkerMissing
+// findCandidate scans all UUID-tagged block-comment payloads in text,
+// keeps every one that parses as JSON and contains the requested key with
+// both "encrypted" and "iv" fields, then uses the last such candidate
+// (matching upstream DUn's lastIndexOf behaviour).
+//
+// It returns the AES-256-CBC key (SHA-256 of the bundle with the candidate
+// block stripped) and the raw JSON of the matching secret entry.
+func findCandidate(text, name string) ([]byte, json.RawMessage, error) {
+	type candidate struct {
+		start int
+		end   int
+		entry json.RawMessage
 	}
-	rel := strings.Index(text[r:], markerEnd)
-	if rel < 0 {
-		return nil, "", fmt.Errorf("malformed marker block: no closing %q", markerEnd)
-	}
-	// n is the index of the final '/' in " */"; sha256 is computed over
-	// the bundle with bytes [r..n] removed (i.e. text[:r] + text[n+1:]),
-	// matching the upstream stripping rule exactly.
-	n := r + rel + 2
-	if n+1 > len(text) {
-		return nil, "", fmt.Errorf("malformed marker block: truncated tail")
-	}
-	digest := sha256.New()
-	digest.Write([]byte(text[:r]))
-	digest.Write([]byte(text[n+1:]))
-	hashHex := hex.EncodeToString(digest.Sum(nil))
-	key, err := hex.DecodeString(hashHex[:64])
-	if err != nil {
-		return nil, "", fmt.Errorf("decode key: %w", err)
-	}
-	bodyStart := r + len(markerStart)
-	bodyEnd := r + rel
-	if bodyStart > bodyEnd {
-		return nil, "", fmt.Errorf("malformed marker block: empty body")
-	}
-	return key, text[bodyStart:bodyEnd], nil
-}
+	var candidates []candidate
 
-// parseMarkerJSON decodes the marker payload. Pretty-printed bundles store
-// raw JSON; minified bundles emit the body as a JS-string-escaped fragment
-// (typically un-quoted, e.g. ` {\"BUILD_TIME_HMAC_SECRET\":...}`), which is
-// what the reference helper recovers via json.loads(json.loads('"...":')).
-func parseMarkerJSON(body string) (map[string]json.RawMessage, error) {
-	body = strings.TrimSpace(body)
-	body = strings.TrimSuffix(body, "*/")
-	body = strings.TrimSpace(body)
+	for _, loc := range markerRE.FindAllStringIndex(text, -1) {
+		start := loc[0]
+		payloadStart := loc[1] // right after the colon
+		closeRel := strings.Index(text[payloadStart:], markerEnd)
+		if closeRel < 0 {
+			continue
+		}
+		closeAbs := payloadStart + closeRel
+		end := closeAbs + len(markerEnd)
 
-	// First: raw JSON object.
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(body), &obj); err == nil {
-		return obj, nil
-	}
-	// Second: body is itself a JSON string literal (already quoted).
-	var inner string
-	if err := json.Unmarshal([]byte(body), &inner); err == nil {
-		if err := json.Unmarshal([]byte(inner), &obj); err == nil {
-			return obj, nil
+		encoded := strings.TrimSpace(text[payloadStart:closeAbs])
+
+		// Two representations to try, mirroring read-build-value.mjs:
+		//   1. encoded as-is
+		//   2. with JS-string \" escape sequences replaced by literal "
+		for _, rep := range []string{encoded, strings.ReplaceAll(encoded, `\"`, `"`)} {
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(rep), &obj); err != nil {
+				continue
+			}
+			entry, ok := obj[name]
+			if !ok {
+				continue
+			}
+			// Entry must have both encrypted and iv fields.
+			var check struct {
+				Encrypted string          `json:"encrypted"`
+				IV        json.RawMessage `json:"iv"`
+			}
+			if err := json.Unmarshal(entry, &check); err != nil || check.Encrypted == "" || len(check.IV) == 0 {
+				continue
+			}
+			candidates = append(candidates, candidate{start: start, end: end, entry: entry})
+			break
 		}
 	}
-	// Third (the common case for minified bundles): body is the
-	// _contents_ of a JS-string with escape sequences left in place.
-	// Wrap in quotes to turn it into a valid JSON string literal, then
-	// JSON-decode twice.
-	if err := json.Unmarshal([]byte(`"`+body+`"`), &inner); err == nil {
-		if err := json.Unmarshal([]byte(inner), &obj); err == nil {
-			return obj, nil
-		}
-	}
-	return nil, fmt.Errorf("body is neither a JSON object nor an (un)quoted JS-escaped JSON string")
-}
 
-// nodeBuffer mirrors the shape Node serialises a Buffer to: {type: "Buffer", data: [int, ...]}.
-type nodeBuffer struct {
-	Type string `json:"type"`
-	Data []int  `json:"data"`
+	if len(candidates) == 0 {
+		return nil, nil, ErrMarkerMissing
+	}
+	last := candidates[len(candidates)-1]
+
+	// SHA-256 over source[0..start] + source[end..], using the raw digest
+	// bytes directly as the 32-byte AES-256 key — matching U5s() in the bundle.
+	h := sha256.New()
+	h.Write([]byte(text[:last.start]))
+	h.Write([]byte(text[last.end:]))
+	key := h.Sum(nil) // 32 bytes
+
+	return key, last.entry, nil
 }
 
 // secretEntry is the layout of a single encrypted secret in the marker JSON.
+// IV may be a NodeBuffer ({type:"Buffer",data:[…]}) or a bare integer array;
+// we decode it as raw JSON and resolve the actual bytes in ivBytes().
 type secretEntry struct {
-	IV        nodeBuffer `json:"iv"`
-	Encrypted string     `json:"encrypted"`
+	IV        json.RawMessage `json:"iv"`
+	Encrypted string          `json:"encrypted"`
+}
+
+// ivBytes resolves the IV from either a NodeBuffer shape or a bare []int,
+// mirroring Buffer.from(entry.iv.data ?? entry.iv) in read-build-value.mjs.
+func ivBytes(raw json.RawMessage) ([]byte, error) {
+	// Try NodeBuffer: {"type":"Buffer","data":[…]}
+	var nb struct {
+		Data []int `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &nb); err == nil && len(nb.Data) > 0 {
+		return intsToBytes(nb.Data)
+	}
+	// Try bare array: [1,2,3,…]
+	var arr []int
+	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		return intsToBytes(arr)
+	}
+	return nil, fmt.Errorf("iv is neither a NodeBuffer nor a bare integer array")
+}
+
+func intsToBytes(ints []int) ([]byte, error) {
+	if len(ints) != aes.BlockSize {
+		return nil, fmt.Errorf("iv.data length = %d, want %d", len(ints), aes.BlockSize)
+	}
+	out := make([]byte, aes.BlockSize)
+	for i, v := range ints {
+		if v < 0 || v > 255 {
+			return nil, fmt.Errorf("iv.data[%d] = %d out of byte range", i, v)
+		}
+		out[i] = byte(v)
+	}
+	return out, nil
 }
 
 func decryptSecretEntry(raw json.RawMessage, key []byte) (string, error) {
@@ -186,15 +205,9 @@ func decryptSecretEntry(raw json.RawMessage, key []byte) (string, error) {
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		return "", fmt.Errorf("decode entry: %w", err)
 	}
-	if len(entry.IV.Data) != aes.BlockSize {
-		return "", fmt.Errorf("iv.data length = %d, want %d", len(entry.IV.Data), aes.BlockSize)
-	}
-	iv := make([]byte, aes.BlockSize)
-	for i, v := range entry.IV.Data {
-		if v < 0 || v > 255 {
-			return "", fmt.Errorf("iv.data[%d] = %d out of byte range", i, v)
-		}
-		iv[i] = byte(v)
+	iv, err := ivBytes(entry.IV)
+	if err != nil {
+		return "", err
 	}
 	ciphertext, err := hex.DecodeString(entry.Encrypted)
 	if err != nil {
@@ -204,7 +217,7 @@ func decryptSecretEntry(raw json.RawMessage, key []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !isUTF8Safe(plain) {
+	if !utf8.Valid(plain) {
 		return "", fmt.Errorf("decrypted secret is not valid UTF-8")
 	}
 	return string(plain), nil
@@ -239,15 +252,4 @@ func pkcs7Unpad(in []byte, blockSize int) ([]byte, error) {
 		}
 	}
 	return in[:len(in)-pad], nil
-}
-
-// isUTF8Safe is a cheap check that avoids returning binary garbage when an
-// extraction silently decrypts to nonsense.
-func isUTF8Safe(b []byte) bool {
-	for _, c := range string(b) {
-		if c == 0xFFFD {
-			return false
-		}
-	}
-	return true
 }

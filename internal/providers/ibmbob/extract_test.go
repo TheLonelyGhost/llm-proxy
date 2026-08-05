@@ -27,24 +27,23 @@ import (
 // only on those two halves, not on the marker body itself. So we:
 //
 //  1. Pick prefix and suffix.
-//  2. Compute the key as sha256(prefix + suffix).
+//  2. Compute the key as SHA-256(prefix + suffix) — raw bytes, no hex step.
 //  3. Encrypt the plaintext secret with that key under a chosen IV.
 //  4. Build the marker JSON around the resulting ciphertext.
 //  5. Concatenate prefix + marker + suffix and write to disk.
+//
+// The UUID used in the marker is arbitrary; the extractor matches any
+// UUID-tagged block comment via a regex.
 func synthBundle(t *testing.T, version, plaintext string) (path string, prefix, suffix string) {
 	t.Helper()
 	prefix = "// fake bob bundle\nBob-Shell/" + version + "\nsome other content here\n"
 	suffix = "\n// trailing content\n"
 
-	// Derive the same key the extractor will compute.
+	// Derive the same key the extractor will compute: raw SHA-256 digest.
 	h := sha256.New()
 	h.Write([]byte(prefix))
 	h.Write([]byte(suffix))
-	keyHex := hex.EncodeToString(h.Sum(nil))
-	key, err := hex.DecodeString(keyHex[:64])
-	if err != nil {
-		t.Fatal(err)
-	}
+	key := h.Sum(nil) // 32 bytes
 
 	iv := []byte("0123456789ABCDEF") // exactly 16 bytes
 	ciphertext, err := aesCBCEncrypt([]byte(plaintext), key, iv)
@@ -66,11 +65,9 @@ func synthBundle(t *testing.T, version, plaintext string) (path string, prefix, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Marker stripping rule: the bytes [r..n] are removed, where r is
-	// the start of "/* fe5f39cc-...:" and n is the position of the final
-	// '/' in " */". So inserting `<markerStart><body> */` exactly between
-	// prefix and suffix leaves "prefix" + "suffix" after stripping - that
-	// matches step 2 above.
+	// The entire "/* <uuid>:<body> */" span is stripped when computing the
+	// key, so inserting it between prefix and suffix preserves prefix+suffix
+	// as the keying material — matching step 2 above.
 	bundle := prefix + "/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:" + string(body) + " */" + suffix
 
 	path = filepath.Join(t.TempDir(), "bob.js")
@@ -143,16 +140,16 @@ func TestExtract_PicksLastMarker(t *testing.T) {
 	// marker), so we must regenerate the bundle accordingly.
 	wantSecret := "real-secret"
 	wantVersion := "9.9.9"
-	// Construct prefix to include a decoy marker block.
-	decoy := "/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:" + `{"bogus":1}` + " */"
+	// Construct prefix to include a decoy marker block (different UUID
+	// to confirm the regex matches any UUID, not just the hardcoded one).
+	decoy := "/* aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:" + `{"bogus":1}` + " */"
 	prefix := "Bob-Shell/" + wantVersion + "\n" + decoy + "\nmiddle\n"
 	suffix := "\nend\n"
 
 	h := sha256.New()
 	h.Write([]byte(prefix))
 	h.Write([]byte(suffix))
-	keyHex := hex.EncodeToString(h.Sum(nil))
-	key, _ := hex.DecodeString(keyHex[:64])
+	key := h.Sum(nil)
 	iv := []byte("ABCDEFGHIJKLMNOP")
 	ct, err := aesCBCEncrypt([]byte(wantSecret), key, iv)
 	if err != nil {
@@ -185,9 +182,10 @@ func TestExtract_PicksLastMarker(t *testing.T) {
 }
 
 func TestExtract_MinifiedJSStringEscaped(t *testing.T) {
-	// Bundlers sometimes wrap the marker JSON in a JS string literal,
-	// which JSON.parse(JSON.stringify(...)) decodes successfully. The
-	// reference helper handles that case; verify we do too.
+	// Bundlers emit the marker JSON with \" instead of " (the payload is
+	// inside a JS string literal in the minified source). The reference
+	// implementation recovers it via a simple replace(/\\"/g, '"');
+	// verify we do the same.
 	wantSecret := "esc-secret"
 	prefix := "Bob-Shell/1.2.3\nstuff\n"
 	suffix := "\nmore\n"
@@ -195,8 +193,7 @@ func TestExtract_MinifiedJSStringEscaped(t *testing.T) {
 	h := sha256.New()
 	h.Write([]byte(prefix))
 	h.Write([]byte(suffix))
-	keyHex := hex.EncodeToString(h.Sum(nil))
-	key, _ := hex.DecodeString(keyHex[:64])
+	key := h.Sum(nil)
 	iv := []byte("0000000000000000")
 	ct, err := aesCBCEncrypt([]byte(wantSecret), key, iv)
 	if err != nil {
@@ -213,13 +210,52 @@ func TestExtract_MinifiedJSStringEscaped(t *testing.T) {
 		},
 	}
 	innerJSON, _ := json.Marshal(inner)
-	// Embed innerJSON inside a JS-style string literal: '"<escaped>"'.
-	escaped, _ := json.Marshal(string(innerJSON)) // produces "\"...\""
-	body := string(escaped)                       // already wrapped in quotes
-	body = strings.TrimPrefix(body, `"`)
-	body = strings.TrimSuffix(body, `"`)
-	bundle := prefix + "/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:" + `"` + body + `"` + " */" + suffix
+	// Produce the JS-string-escaped form: replace " with \" as a bundler would.
+	escapedBody := strings.ReplaceAll(string(innerJSON), `"`, `\"`)
+	bundle := prefix + "/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:" + escapedBody + " */" + suffix
 
+	path := filepath.Join(t.TempDir(), "bob.js")
+	if err := os.WriteFile(path, []byte(bundle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ibmbob.Extract(path)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if got.BuildTimeHMACSecret != wantSecret {
+		t.Errorf("secret = %q, want %q", got.BuildTimeHMACSecret, wantSecret)
+	}
+}
+
+func TestExtract_BareArrayIV(t *testing.T) {
+	// The reference implementation accepts a bare integer array for the IV
+	// (Buffer.from(entry.iv.data ?? entry.iv)). Verify we handle that shape.
+	wantSecret := "bare-iv-secret"
+	prefix := "Bob-Shell/2.0.0\ncontent\n"
+	suffix := "\nend\n"
+
+	h := sha256.New()
+	h.Write([]byte(prefix))
+	h.Write([]byte(suffix))
+	key := h.Sum(nil)
+	iv := []byte("ABCDEFGHIJKLMNOP")
+	ct, err := aesCBCEncrypt([]byte(wantSecret), key, iv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// IV as a bare []int, no "type"/"data" wrapper.
+	ivData := make([]int, len(iv))
+	for i, b := range iv {
+		ivData[i] = int(b)
+	}
+	entry := map[string]any{
+		"BUILD_TIME_HMAC_SECRET": map[string]any{
+			"iv":        ivData, // bare array, not a NodeBuffer
+			"encrypted": hex.EncodeToString(ct),
+		},
+	}
+	body, _ := json.Marshal(entry)
+	bundle := prefix + "/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:" + string(body) + " */" + suffix
 	path := filepath.Join(t.TempDir(), "bob.js")
 	if err := os.WriteFile(path, []byte(bundle), 0o600); err != nil {
 		t.Fatal(err)
@@ -261,31 +297,37 @@ func TestExtract_Errors(t *testing.T) {
 		}
 	})
 	t.Run("unterminated marker", func(t *testing.T) {
+		// A UUID block comment with no closing " */" is skipped; because no
+		// valid candidate is found the error is ErrMarkerMissing.
 		p := filepath.Join(t.TempDir(), "bob.js")
 		body := "Bob-Shell/1.0.0\n/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:{}"
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_, err := ibmbob.Extract(p)
-		if err == nil || !strings.Contains(err.Error(), "no closing") {
+		if !errors.Is(err, ibmbob.ErrMarkerMissing) {
 			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("marker without secret entry", func(t *testing.T) {
+		// A block comment whose JSON parses but has no BUILD_TIME_HMAC_SECRET
+		// entry with both encrypted+iv is treated as a non-candidate; with no
+		// other candidates, ErrMarkerMissing is returned.
 		prefix := "Bob-Shell/1.0.0\n"
 		suffix := "\n"
-		// Need to compute the key the extractor will derive so the JSON parse succeeds.
 		bundle := prefix + `/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:{"other_secret":{}} */` + suffix
 		p := filepath.Join(t.TempDir(), "bob.js")
 		if err := os.WriteFile(p, []byte(bundle), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_, err := ibmbob.Extract(p)
-		if !errors.Is(err, ibmbob.ErrSecretMissing) {
+		if !errors.Is(err, ibmbob.ErrMarkerMissing) {
 			t.Fatalf("err = %v", err)
 		}
 	})
 	t.Run("malformed marker JSON", func(t *testing.T) {
+		// A UUID block comment whose payload is not valid JSON (in either
+		// representation) is skipped; no valid candidate → ErrMarkerMissing.
 		prefix := "Bob-Shell/1.0.0\n"
 		suffix := "\n"
 		bundle := prefix + `/* fe5f39cc-5de4-4123-b4b6-e5fc51deefbd:not-json */` + suffix
@@ -294,7 +336,7 @@ func TestExtract_Errors(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := ibmbob.Extract(p)
-		if err == nil || !strings.Contains(err.Error(), "parse marker JSON") {
+		if !errors.Is(err, ibmbob.ErrMarkerMissing) {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -349,8 +391,7 @@ func TestExtract_Errors(t *testing.T) {
 		h := sha256.New()
 		h.Write([]byte(wantPrefix))
 		h.Write([]byte(wantSuffix))
-		keyHex := hex.EncodeToString(h.Sum(nil))
-		key, _ := hex.DecodeString(keyHex[:64])
+		key := h.Sum(nil)
 		iv := []byte("0000000000000000")
 		ct, err := aesCBCEncrypt([]byte("secret"), key, iv)
 		if err != nil {

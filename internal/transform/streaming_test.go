@@ -555,3 +555,160 @@ func TestStreamTransformer_NoBuffering(t *testing.T) {
 
 	t.Logf("First read returned %d bytes (stream is not fully buffered)", firstReadBytes)
 }
+
+// TestStreamTransformer_LargeEventAcrossSmallBuffers verifies that a formatted
+// SSE event whose serialised size exceeds the caller's Read buffer is delivered
+// in full across multiple Read calls without error, and that subsequent events
+// in the same stream are also delivered correctly.
+func TestStreamTransformer_LargeEventAcrossSmallBuffers(t *testing.T) {
+	// Build a JSON payload large enough to exceed a 64-byte buffer once wrapped
+	// in "data: ...\n\n" (the prefix+suffix add 8 bytes).
+	bigContent := strings.Repeat("a", 200)
+	input := `data: {"id":"1","choices":[{"delta":{"content":"` + bigContent + `"}}]}` + "\n\n" +
+		`data: {"id":"2","choices":[{"delta":{"content":"end"}}]}` + "\n\n"
+
+	body := io.NopCloser(strings.NewReader(input))
+	transformer := TransformStreamingChatResponse(body, "test/model")
+	defer transformer.Close()
+
+	// Use a 64-byte buffer — far smaller than the ~250-byte first event.
+	buf := make([]byte, 64)
+	var collected strings.Builder
+	for {
+		n, err := transformer.Read(buf)
+		if n > 0 {
+			collected.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Read() returned unexpected error: %v", err)
+		}
+	}
+
+	got := collected.String()
+	if !strings.Contains(got, bigContent) {
+		t.Errorf("large event content missing from output; got %d bytes total", len(got))
+	}
+	if !strings.Contains(got, `"id":"2"`) {
+		t.Errorf("second event missing from output")
+	}
+	// Both events must be well-formed SSE blocks ending with \n\n.
+	// SplitAfter on \n\n leaves a trailing empty string after the last separator;
+	// skip that instead of trimming the string first (trimming removes the terminator).
+	blocks := strings.SplitAfter(got, "\n\n")
+	for i, b := range blocks {
+		if b == "" {
+			continue // trailing empty element after final separator
+		}
+		if !strings.HasSuffix(b, "\n\n") {
+			t.Errorf("block %d does not end with \\n\\n: %q", i, b)
+		}
+	}
+}
+
+// TestResponsesTransformer_LargeEventAcrossSmallBuffers is the same scenario
+// for the responses-specific transformer.
+func TestResponsesTransformer_LargeEventAcrossSmallBuffers(t *testing.T) {
+	bigModel := strings.Repeat("m", 200)
+	input := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"r1","model":"` + bigModel + `","status":"in_progress"}}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"r1","model":"` + bigModel + `","status":"completed"}}` + "\n\n"
+
+	body := io.NopCloser(strings.NewReader(input))
+	transformer := TransformStreamingResponsesResponse(body, "prefix/"+bigModel)
+	defer transformer.Close()
+
+	buf := make([]byte, 64)
+	var collected strings.Builder
+	for {
+		n, err := transformer.Read(buf)
+		if n > 0 {
+			collected.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Read() returned unexpected error: %v", err)
+		}
+	}
+
+	got := collected.String()
+	if !strings.Contains(got, `"prefix/`+bigModel+`"`) {
+		t.Errorf("rewritten model id missing from output; got %d bytes total", len(got))
+	}
+	if !strings.Contains(got, "response.completed") {
+		t.Errorf("second event missing from output")
+	}
+}
+
+// TestResponsesTransformer_ManyEmptyBlocksNoStackOverflow verifies that a
+// stream with a large run of consecutive empty blocks (\n\n repeated) does
+// not overflow the call stack and still delivers the trailing real event.
+func TestResponsesTransformer_ManyEmptyBlocksNoStackOverflow(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 10_000; i++ {
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString(`data: {"type":"done"}` + "\n\n")
+
+	body := io.NopCloser(strings.NewReader(sb.String()))
+	transformer := TransformStreamingResponsesResponse(body, "test/model")
+	defer transformer.Close()
+
+	buf := make([]byte, 4096)
+	var collected strings.Builder
+	for {
+		n, err := transformer.Read(buf)
+		if n > 0 {
+			collected.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Read() error: %v", err)
+		}
+	}
+
+	if !strings.Contains(collected.String(), `"type":"done"`) {
+		t.Errorf("expected final event to be delivered, got: %q", collected.String())
+	}
+}
+
+// TestStreamTransformer_ManyMalformedBlocksNoStackOverflow verifies that a
+// stream with a large run of malformed-JSON data lines (which are skipped)
+// does not overflow the call stack and still delivers the final valid event.
+func TestStreamTransformer_ManyMalformedBlocksNoStackOverflow(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 10_000; i++ {
+		sb.WriteString("data: {bad json}\n\n")
+	}
+	sb.WriteString(`data: {"id":"last","choices":[]}` + "\n\n")
+
+	body := io.NopCloser(strings.NewReader(sb.String()))
+	transformer := TransformStreamingChatResponse(body, "test/model")
+	defer transformer.Close()
+
+	buf := make([]byte, 4096)
+	var collected strings.Builder
+	for {
+		n, err := transformer.Read(buf)
+		if n > 0 {
+			collected.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Read() error: %v", err)
+		}
+	}
+
+	if !strings.Contains(collected.String(), `"id":"last"`) {
+		t.Errorf("expected final event to be delivered, got %d bytes", collected.Len())
+	}
+}

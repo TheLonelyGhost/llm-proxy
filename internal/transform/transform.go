@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 )
@@ -27,6 +28,14 @@ type TransformResult struct {
 // structure, preserving the model prefix.
 func TransformChatResponse(statusCode int, body io.ReadCloser, stream bool, modelPrefix string) (*TransformResult, error) {
 	if stream {
+		if statusCode >= 400 {
+			defer func() { _ = body.Close() }()
+			data, err := io.ReadAll(body)
+			if err != nil {
+				return nil, fmt.Errorf("read response body: %w", err)
+			}
+			return transformErrorResponse(statusCode, data)
+		}
 		return &TransformResult{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}, "Connection": []string{"keep-alive"}},
@@ -114,6 +123,14 @@ func TransformChatResponse(statusCode int, body io.ReadCloser, stream bool, mode
 // normalizing the choices array and logprobs field.
 func TransformCompletionResponse(statusCode int, body io.ReadCloser, stream bool, modelPrefix string) (*TransformResult, error) {
 	if stream {
+		if statusCode >= 400 {
+			defer func() { _ = body.Close() }()
+			data, err := io.ReadAll(body)
+			if err != nil {
+				return nil, fmt.Errorf("read response body: %w", err)
+			}
+			return transformErrorResponse(statusCode, data)
+		}
 		return &TransformResult{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}, "Connection": []string{"keep-alive"}},
@@ -283,8 +300,32 @@ func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix 
 // TransformResponsesResponse transforms a backend responses endpoint response
 // into OpenAI-compliant format. Handles reasoning output fields and reasoning_tokens
 // in usage data. Supports both streaming and non-streaming responses.
-func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool, modelPrefix string) (*TransformResult, error) {
+//
+// upstreamHeader is the HTTP header from the backend response. When the backend
+// has already translated the stream into Responses-named SSE events (indicated by
+// Content-Type: text/event-stream on a streaming request), the body is forwarded
+// unchanged so that required fields (sequence_number, logprobs, etc.) emitted by
+// the provider-level shim are not stripped by a second JSON round-trip.
+func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool, modelPrefix string, upstreamHeader http.Header) (*TransformResult, error) {
 	if stream {
+		if statusCode >= 400 {
+			defer func() { _ = body.Close() }()
+			data, err := io.ReadAll(body)
+			if err != nil {
+				return nil, fmt.Errorf("read response body: %w", err)
+			}
+			return transformErrorResponse(statusCode, data)
+		}
+		// If the backend already emitted a Responses-API SSE stream (e.g. via the
+		// responsesshim), pass it through verbatim. Re-encoding would silently drop
+		// required fields such as sequence_number, logprobs, and usage details.
+		if upstreamHeader != nil && strings.Contains(upstreamHeader.Get("Content-Type"), "text/event-stream") {
+			return &TransformResult{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}, "Connection": []string{"keep-alive"}},
+				Body:       body,
+			}, nil
+		}
 		return &TransformResult{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}, "Connection": []string{"keep-alive"}},
@@ -312,12 +353,37 @@ func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool,
 		return errorResponse(http.StatusBadGateway, "upstream_error", "upstream returned empty JSON object")
 	}
 
-	// Pass-through path: backend already produced a real Responses-shaped
-	// body (top-level `output` array, per OpenAI Responses API). Rewrite
-	// `model` and re-encode without further reshaping.
-	if _, hasOutput := raw["output"].([]any); hasOutput {
-		raw["model"] = modelPrefix
-		out, err := json.Marshal(raw)
+	// Native Responses API shape: top-level `output` array present.
+	// Fully re-normalise: extract known fields, rewrite model, drop upstream-
+	// specific fields (status, created_at) that don't belong in our output.
+	if outputArr, hasOutput := raw["output"].([]any); hasOutput {
+		id := getStringOr(raw, "id", "resp-unknown")
+
+		// Upstream may use created_at (int) or created (int).
+		var created int64
+		if v, ok := raw["created_at"]; ok {
+			switch n := v.(type) {
+			case float64:
+				created = int64(n)
+			case int64:
+				created = n
+			}
+		}
+		if created == 0 {
+			created = getInt64Or(raw, "created", now())
+		}
+
+		normalised := map[string]any{
+			"id":         id,
+			"object":     "response",
+			"created_at": created,
+			"model":      modelPrefix,
+			"output":     outputArr,
+		}
+		if u, ok := raw["usage"]; ok {
+			normalised["usage"] = u
+		}
+		out, err := json.Marshal(normalised)
 		if err != nil {
 			return errorResponse(http.StatusInternalServerError, "internal_error", "failed to re-encode response")
 		}

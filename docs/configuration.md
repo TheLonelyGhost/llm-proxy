@@ -230,15 +230,20 @@ The `token_limits` object contains:
 **Reasoning effort levels:**
 
 For models with the `reasoning` capability, `reasoning_effort_levels` lists
-supported effort values for the `/v1/responses` endpoint:
+supported effort values for the `/v1/responses` endpoint. The full OpenAI
+`ReasoningEffort` allow-list is:
 
-- `minimal`: Minimal reasoning, fastest response (GPT-5 family)
+- `none`: Disable reasoning (skip the internal chain-of-thought)
+- `minimal`: Minimal reasoning, fastest response
 - `low`: Faster response with less reasoning depth
-- `medium`: Balanced response time and reasoning quality
+- `medium`: Balanced response time and reasoning quality (default)
 - `high`: Slower response with deeper reasoning
+- `xhigh`: Extended reasoning for complex problems
+- `max`: Maximum reasoning depth, slowest response
 
-The proxy validates `reasoning.effort` against this set and returns HTTP 400
-`invalid_request_error` for any other value.
+The proxy validates `reasoning.effort` against this full set and returns HTTP 400
+`invalid_request_error` for any other value. Not all reasoning models support
+every value; unsupported values are rejected by the upstream.
 
 **`/v1/responses` request body:**
 

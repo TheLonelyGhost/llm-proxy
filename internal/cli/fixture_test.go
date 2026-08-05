@@ -21,11 +21,7 @@ func buildFixtureBundle(t *testing.T) (bundle []byte, version, secret string) {
 	h := sha256.New()
 	h.Write([]byte(prefix))
 	h.Write([]byte(suffix))
-	keyHex := hex.EncodeToString(h.Sum(nil))
-	key, err := hex.DecodeString(keyHex[:64])
-	if err != nil {
-		t.Fatal(err)
-	}
+	key := h.Sum(nil) // 32-byte raw digest, no hex round-trip
 	iv := []byte("0123456789ABCDEF")
 	block, err := aes.NewCipher(key)
 	if err != nil {

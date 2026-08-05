@@ -102,6 +102,11 @@ The OpenAI provider forwards requests to the following endpoints:
 - **Chat completions**: `POST /chat/completions` (streaming and non-streaming)
 - **Legacy completions**: `POST /completions` (streaming and non-streaming)
 - **Embeddings**: `POST /embeddings`
+- **Responses**: `POST /v1/responses` — forwarded verbatim to the OpenAI
+  Responses API. Supports `reasoning.effort` values `"none"`, `"minimal"`,
+  `"low"`, `"medium"` (default), `"high"`, `"xhigh"`, and `"max"` as defined
+  by the OpenAI `ReasoningEffort` schema. No in-proxy translation is applied;
+  the upstream's native Responses API handles the request.
 
 ## Headers sent upstream
 

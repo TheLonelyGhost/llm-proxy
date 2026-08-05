@@ -22,3 +22,4 @@ vendor/
 testdata/fuzz/
 
 /*.hcl
+/.scratch/
