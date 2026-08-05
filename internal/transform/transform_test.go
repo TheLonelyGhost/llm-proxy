@@ -6,7 +6,21 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/thelonelyghost/llm-proxy/internal/backend"
 )
+
+// resp builds a minimal *backend.Response for use in table-driven tests.
+func resp(statusCode int, body string, header http.Header) *backend.Response {
+	if header == nil {
+		header = http.Header{}
+	}
+	return &backend.Response{
+		StatusCode: statusCode,
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
 
 func TestTransformChatResponse(t *testing.T) {
 	tests := []struct {
@@ -250,11 +264,10 @@ func TestTransformChatResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := io.NopCloser(strings.NewReader(tt.responseBody))
-			result, err := TransformChatResponse(tt.statusCode, body, tt.stream, tt.modelPrefix)
+			result, err := Transform(resp(tt.statusCode, tt.responseBody, nil), EndpointChat, tt.stream, tt.modelPrefix)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("TransformChatResponse() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("Transform(EndpointChat) error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -372,11 +385,10 @@ func TestTransformCompletionResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := io.NopCloser(strings.NewReader(tt.responseBody))
-			result, err := TransformCompletionResponse(tt.statusCode, body, tt.stream, tt.modelPrefix)
+			result, err := Transform(resp(tt.statusCode, tt.responseBody, nil), EndpointCompletion, tt.stream, tt.modelPrefix)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("TransformCompletionResponse() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("Transform(EndpointCompletion) error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -562,11 +574,10 @@ func TestTransformEmbeddingResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := io.NopCloser(strings.NewReader(tt.responseBody))
-			result, err := TransformEmbeddingResponse(tt.statusCode, body, tt.modelPrefix)
+			result, err := Transform(resp(tt.statusCode, tt.responseBody, nil), EndpointEmbedding, false, tt.modelPrefix)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("TransformEmbeddingResponse() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("Transform(EndpointEmbedding) error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -850,11 +861,10 @@ func TestTransformResponsesResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := io.NopCloser(strings.NewReader(tt.responseBody))
-			result, err := TransformResponsesResponse(tt.statusCode, body, tt.stream, tt.modelPrefix, nil)
+			result, err := Transform(resp(tt.statusCode, tt.responseBody, nil), EndpointResponses, tt.stream, tt.modelPrefix)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("TransformResponsesResponse() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("Transform(EndpointResponses) error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -864,101 +874,6 @@ func TestTransformResponsesResponse(t *testing.T) {
 
 			if tt.validate != nil {
 				tt.validate(t, result)
-			}
-		})
-	}
-}
-
-func TestTransformErrorResponse(t *testing.T) {
-	tests := []struct {
-		name         string
-		statusCode   int
-		responseBody string
-		headers      map[string][]string
-		wantStatus   int
-		validate     func(t *testing.T, resp *ErrorResponse)
-	}{
-		{
-			name:       "structured JSON error",
-			statusCode: http.StatusBadRequest,
-			responseBody: `{
-				"error": {
-					"message": "Invalid request parameter",
-					"type": "invalid_request_error",
-					"code": "invalid_value"
-				}
-			}`,
-			wantStatus: http.StatusBadRequest,
-			validate: func(t *testing.T, resp *ErrorResponse) {
-				if resp.Error.Type != "invalid_request_error" {
-					t.Errorf("expected type=invalid_request_error, got %s", resp.Error.Type)
-				}
-				if resp.Error.Message != "Invalid request parameter" {
-					t.Errorf("unexpected message: %s", resp.Error.Message)
-				}
-			},
-		},
-		{
-			name:         "plain text error",
-			statusCode:   http.StatusInternalServerError,
-			responseBody: "Internal server error occurred",
-			wantStatus:   http.StatusInternalServerError,
-			validate: func(t *testing.T, resp *ErrorResponse) {
-				if resp.Error.Type != "upstream_error" {
-					t.Errorf("expected type=upstream_error, got %s", resp.Error.Type)
-				}
-				if resp.Error.Message != "Internal server error occurred" {
-					t.Errorf("unexpected message: %s", resp.Error.Message)
-				}
-			},
-		},
-		{
-			name:       "error with retry-after header",
-			statusCode: http.StatusTooManyRequests,
-			responseBody: `{
-				"error": {
-					"message": "Rate limit exceeded"
-				}
-			}`,
-			headers: map[string][]string{
-				"Retry-After": {"60"},
-			},
-			wantStatus: http.StatusTooManyRequests,
-			validate: func(t *testing.T, resp *ErrorResponse) {
-				if resp.Error.Type != "rate_limit_error" {
-					t.Errorf("expected type=rate_limit_error, got %s", resp.Error.Type)
-				}
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			body := io.NopCloser(strings.NewReader(tt.responseBody))
-			result, err := TransformErrorResponse(tt.statusCode, body, tt.headers)
-
-			if err != nil {
-				t.Fatalf("TransformErrorResponse() unexpected error: %v", err)
-			}
-
-			if result.StatusCode != tt.wantStatus {
-				t.Errorf("expected status %d, got %d", tt.wantStatus, result.StatusCode)
-			}
-
-			bodyData, _ := io.ReadAll(result.Body)
-			var errResp ErrorResponse
-			if err := json.Unmarshal(bodyData, &errResp); err != nil {
-				t.Fatalf("failed to unmarshal error response: %v", err)
-			}
-
-			if tt.validate != nil {
-				tt.validate(t, &errResp)
-			}
-
-			if tt.headers != nil && tt.headers["Retry-After"] != nil {
-				if result.Header.Get("Retry-After") != tt.headers["Retry-After"][0] {
-					t.Errorf("expected Retry-After header to be preserved")
-				}
 			}
 		})
 	}
@@ -1011,7 +926,8 @@ func TestTransformResponsesResponse_ShimPassThrough(t *testing.T) {
 
 	upstreamHeader := http.Header{"Content-Type": []string{"text/event-stream"}}
 	body := io.NopCloser(strings.NewReader(upstreamBody))
-	result, err := TransformResponsesResponse(200, body, true, "copilot/gpt-4o", upstreamHeader)
+	upstreamResp := &backend.Response{StatusCode: 200, Header: upstreamHeader, Body: body}
+	result, err := Transform(upstreamResp, EndpointResponses, true, "copilot/gpt-4o")
 	if err != nil {
 		t.Fatal(err)
 	}

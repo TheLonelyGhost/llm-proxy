@@ -192,6 +192,13 @@ type BudgetReporter interface {
 	Budget(ctx context.Context) (Budget, error)
 }
 
+// Reloadable is implemented by backends that can hot-reload their in-memory
+// credential cache from disk on SIGHUP without restarting the HTTP listener.
+// The Reload method must be safe for concurrent use.
+type Reloadable interface {
+	Reload()
+}
+
 // Backend is the interface every provider must satisfy.
 //
 // Implementations must be safe for concurrent use.

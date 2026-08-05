@@ -22,11 +22,46 @@ type TransformResult struct {
 	Body       io.ReadCloser
 }
 
-// TransformChatResponse transforms a backend chat completion response into
+// Endpoint identifies which OpenAI-compatible endpoint a backend Response
+// came from. The server passes one of the four constants below; the
+// Transform function dispatches to the appropriate normalisation logic.
+type Endpoint int
+
+// Endpoint constants. One per OpenAI-compatible operation the proxy speaks.
+const (
+	EndpointChat Endpoint = iota + 1
+	EndpointCompletion
+	EndpointEmbedding
+	EndpointResponses
+)
+
+// Transform normalises a raw backend Response into an OpenAI-compliant
+// TransformResult. It dispatches to the per-endpoint logic based on ep,
+// so callers need no knowledge of the individual Transform* functions.
+//
+// The resp.Body is always closed by Transform; callers must not read it
+// after this call returns.
+func Transform(resp *backend.Response, ep Endpoint, stream bool, modelPrefix string) (*TransformResult, error) {
+	switch ep {
+	case EndpointChat:
+		return transformChat(resp.StatusCode, resp.Body, stream, modelPrefix)
+	case EndpointCompletion:
+		return transformCompletion(resp.StatusCode, resp.Body, stream, modelPrefix)
+	case EndpointEmbedding:
+		return transformEmbedding(resp.StatusCode, resp.Body, modelPrefix)
+	case EndpointResponses:
+		return transformResponses(resp.StatusCode, resp.Body, stream, modelPrefix, resp.Header)
+	default:
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("transform: unknown endpoint %d", ep)
+	}
+}
+
+// transformChat transforms a backend chat completion response into
 // OpenAI-compliant format. For streaming responses, it returns an SSE stream
 // transformer. For non-streaming responses, it parses and normalizes the JSON
 // structure, preserving the model prefix.
-func TransformChatResponse(statusCode int, body io.ReadCloser, stream bool, modelPrefix string) (*TransformResult, error) {
+func transformChat(statusCode int, body io.ReadCloser, stream bool, modelPrefix string) (*TransformResult, error) {
 	if stream {
 		if statusCode >= 400 {
 			defer func() { _ = body.Close() }()
@@ -118,10 +153,10 @@ func TransformChatResponse(statusCode int, body io.ReadCloser, stream bool, mode
 	}, nil
 }
 
-// TransformCompletionResponse transforms a backend text completion response into
+// transformCompletion transforms a backend text completion response into
 // OpenAI-compliant format. Handles both streaming and non-streaming responses,
 // normalizing the choices array and logprobs field.
-func TransformCompletionResponse(statusCode int, body io.ReadCloser, stream bool, modelPrefix string) (*TransformResult, error) {
+func transformCompletion(statusCode int, body io.ReadCloser, stream bool, modelPrefix string) (*TransformResult, error) {
 	if stream {
 		if statusCode >= 400 {
 			defer func() { _ = body.Close() }()
@@ -203,10 +238,10 @@ func TransformCompletionResponse(statusCode int, body io.ReadCloser, stream bool
 	}, nil
 }
 
-// TransformEmbeddingResponse transforms a backend embedding response into
+// transformEmbedding transforms a backend embedding response into
 // OpenAI-compliant format. Validates vector dimensions and handles batch inputs.
 // Returns an error if embeddings contain non-numeric values or are empty.
-func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix string) (*TransformResult, error) {
+func transformEmbedding(statusCode int, body io.ReadCloser, modelPrefix string) (*TransformResult, error) {
 	defer func() { _ = body.Close() }()
 	data, err := io.ReadAll(body)
 	if err != nil {
@@ -297,7 +332,7 @@ func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix 
 	}, nil
 }
 
-// TransformResponsesResponse transforms a backend responses endpoint response
+// transformResponses transforms a backend responses endpoint response
 // into OpenAI-compliant format. Handles reasoning output fields and reasoning_tokens
 // in usage data. Supports both streaming and non-streaming responses.
 //
@@ -306,7 +341,7 @@ func TransformEmbeddingResponse(statusCode int, body io.ReadCloser, modelPrefix 
 // Content-Type: text/event-stream on a streaming request), the body is forwarded
 // unchanged so that required fields (sequence_number, logprobs, etc.) emitted by
 // the provider-level shim are not stripped by a second JSON round-trip.
-func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool, modelPrefix string, upstreamHeader http.Header) (*TransformResult, error) {
+func transformResponses(statusCode int, body io.ReadCloser, stream bool, modelPrefix string, upstreamHeader http.Header) (*TransformResult, error) {
 	if stream {
 		if statusCode >= 400 {
 			defer func() { _ = body.Close() }()
@@ -440,62 +475,6 @@ func TransformResponsesResponse(statusCode int, body io.ReadCloser, stream bool,
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(bytes.NewReader(result)),
-	}, nil
-}
-
-// TransformErrorResponse transforms a backend error response into OpenAI-compliant
-// error format. Maps HTTP status codes to OpenAI error types and preserves relevant
-// headers like Retry-After. Handles both structured JSON errors and plain text responses.
-func TransformErrorResponse(statusCode int, body io.ReadCloser, headers map[string][]string) (*backend.Response, error) {
-	defer func() { _ = body.Close() }()
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return nil, fmt.Errorf("read error response body: %w", err)
-	}
-
-	errType := mapStatusToErrorType(statusCode)
-	message := "upstream returned error"
-
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err == nil {
-		if errData, ok := raw["error"]; ok {
-			if errMap, ok := errData.(map[string]any); ok {
-				message = getStringOr(errMap, "message", message)
-			}
-		} else if msg, ok := raw["message"]; ok {
-			if msgStr, ok := msg.(string); ok {
-				message = msgStr
-			}
-		}
-	} else {
-		plainText := string(data)
-		if len(plainText) > 0 && len(plainText) < 500 {
-			message = plainText
-		}
-	}
-
-	errResp := ErrorResponse{
-		Error: ErrorDetail{
-			Message: message,
-			Type:    errType,
-			Code:    nil,
-		},
-	}
-
-	respData, _ := json.Marshal(errResp)
-	respHeaders := http.Header{"Content-Type": []string{"application/json"}}
-
-	if retryAfter, ok := headers["Retry-After"]; ok && len(retryAfter) > 0 {
-		respHeaders.Set("Retry-After", retryAfter[0])
-	}
-	if rateLimitReset, ok := headers["X-RateLimit-Reset"]; ok && len(rateLimitReset) > 0 {
-		respHeaders.Set("X-RateLimit-Reset", rateLimitReset[0])
-	}
-
-	return &backend.Response{
-		StatusCode: statusCode,
-		Header:     respHeaders,
-		Body:       io.NopCloser(bytes.NewReader(respData)),
 	}, nil
 }
 

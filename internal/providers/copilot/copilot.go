@@ -15,10 +15,8 @@
 package copilot
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -227,38 +225,15 @@ func (p *Provider) Auth() *Authenticator { return p.auth }
 func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
 	ctx, span := p.tracer.Start(ctx, "copilot.models")
 	defer span.End()
-	// If no models configured, return empty list (allow-list mode)
-	if len(p.models) == 0 {
-		return nil, nil
-	}
 
-	// Get full model metadata from upstream
-	allModels, err := p.ListUpstreamModels(ctx)
+	models, err := backend.Filter(ctx, p.models, p)
 	if err != nil {
 		span.RecordError(err)
 		span.AddEvent("upstream model listing failed; using configured allow-list")
 		p.logger.Warn("copilot model listing failed; using allow-list fallback", "backend", p.name, "err", err)
-		// Fallback to minimal ModelInfo if upstream query fails
-		out := make([]backend.ModelInfo, 0, len(p.models))
-		for _, m := range p.models {
-			out = append(out, backend.ModelInfo{ID: m, Vendor: p.name})
-		}
-		return out, nil
+		return backend.StubModels(p.models, p.name), nil
 	}
-
-	// Filter to configured allow-list
-	modelSet := make(map[string]bool, len(p.models))
-	for _, m := range p.models {
-		modelSet[m] = true
-	}
-
-	out := make([]backend.ModelInfo, 0, len(p.models))
-	for _, info := range allModels {
-		if modelSet[info.ID] {
-			out = append(out, info)
-		}
-	}
-	return out, nil
+	return models, nil
 }
 
 // Chat forwards a chat-completions request to Copilot.
@@ -288,66 +263,15 @@ func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*ba
 // Responses implements the OpenAI /v1/responses surface by translating the
 // request into a /chat/completions call against Copilot's upstream, then
 // translating the response (JSON or SSE) back into the Responses API shape.
-// See responses_shim.go for the supported subset and explicit non-goals.
+// See internal/responsesshim for the supported subset and explicit non-goals.
 func (p *Provider) Responses(ctx context.Context, req backend.ResponsesRequest) (*backend.Response, error) {
 	if err := p.allowed(req.Model); err != nil {
 		return nil, err
 	}
-
-	chatBody, _, _, err := responsesshim.TranslateRequest(req.Body)
-	if err != nil {
-		return nil, fmt.Errorf("translate /v1/responses request: %w", err)
-	}
-
-	resp, err := p.forward(ctx, "POST", "/chat/completions", chatBody, req.Stream)
-	if err != nil {
-		return nil, err
-	}
-
-	// On non-2xx, pass the upstream response through so the server's error
-	// envelope handling kicks in unchanged.
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp, nil
-	}
-
 	modelPrefix := p.name + "/" + req.Model
-
-	if req.Stream {
-		resp.Body = responsesshim.TranslateChatStreamToResponses(resp.Body, modelPrefix)
-		// Surface the proxy as an SSE source; the server's transform layer
-		// will pass these named events through unchanged.
-		resp.Header = cloneHeader(resp.Header)
-		resp.Header.Set("Content-Type", "text/event-stream")
-		resp.Header.Set("Cache-Control", "no-cache")
-		return resp, nil
-	}
-
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read upstream chat response: %w", err)
-	}
-	translated, err := responsesshim.TranslateChatCompletion(raw, modelPrefix)
-	if err != nil {
-		return nil, err
-	}
-	hdr := cloneHeader(resp.Header)
-	hdr.Set("Content-Type", "application/json")
-	return &backend.Response{
-		StatusCode: resp.StatusCode,
-		Header:     hdr,
-		Body:       io.NopCloser(bytes.NewReader(translated)),
-	}, nil
-}
-
-// cloneHeader returns a deep-ish copy of an http.Header so we can mutate it
-// without affecting upstream-owned state.
-func cloneHeader(h http.Header) http.Header {
-	out := make(http.Header, len(h))
-	for k, vv := range h {
-		out[k] = append([]string(nil), vv...)
-	}
-	return out
+	return responsesshim.Dispatch(ctx, req, modelPrefix, func(ctx context.Context, body []byte, stream bool) (*backend.Response, error) {
+		return p.forward(ctx, "POST", "/chat/completions", body, stream)
+	})
 }
 
 // allowed enforces the configured model allow-list. An empty allow-list

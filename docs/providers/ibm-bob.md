@@ -14,7 +14,24 @@ wire protocol used by the official `bob` CLI:
 > already have a Bob entitlement and the credentials to call those endpoints.
 > The project is not affiliated with IBM. Use at your own risk.
 
+## Authentication modes
+
+The backend supports two authentication modes. The presence or absence of
+`api_key` in the Configuration determines which is active:
+
+| Mode | When to use | Required HCL fields |
+| ---- | ----------- | ------------------- |
+| **Static API key** | You hold a pre-issued Bob API key or JWT | `api_key`, `hmac_secret` (for modern-backend keys) |
+| **Browser SSO** | You authenticate via IBM Bob's web login | `hmac_secret` only; no `api_key` |
+
+When `api_key` is absent the proxy operates in SSO mode. On startup it loads
+`<cache-dir>/llm-proxy/ibmbob_<name>_token.json` if present; otherwise the
+first incoming request fails with an error until `llm-proxy ibm-bob login`
+has been run.
+
 ## API-key routing
+
+Applies to **static API key mode** only.
 
 | Key shape                          | Backend host                                | Auth header  | HMAC signed |
 | ---------------------------------- | ------------------------------------------- | ------------ | ----------- |
@@ -24,13 +41,19 @@ wire protocol used by the official `bob` CLI:
 
 The `api_base` HCL field overrides host selection unconditionally.
 
+In **SSO mode** the modern production host is always used and the access
+token (always a JWT) is sent as `Bearer <token>`.
+
 ## Required configuration
+
+### Static API key
 
 ```hcl
 backend "bob" {
   type    = "ibm-bob"
 
-  # Required. Wrap in env() so the secret never lives in the file.
+  # Required for static-key mode. Wrap in env() so the secret never lives
+  # in the file.
   api_key = env("BOBSHELL_API_KEY")
 
   # Required when the resolved key targets the modern (authn) backend -
@@ -39,12 +62,27 @@ backend "bob" {
   hmac_secret = env("BOB_HMAC_SECRET")
   user_agent  = "bobshell/${env("BOB_VERSION")}"
 
-  # Routing allow-list. Clients address models as "<prefix>/<id>" where
-  # <prefix> is the block label ("bob" here) and <id> is one of these.
   models = [
     "premium",
     # add your entitled models here
   ]
+}
+```
+
+### Browser SSO
+
+Omit `api_key` entirely. Run `llm-proxy ibm-bob login` once to populate the
+token file, then start `serve`:
+
+```hcl
+backend "bob" {
+  type        = "ibm-bob"
+
+  # Required: HMAC signing is still needed in SSO mode.
+  hmac_secret = env("BOB_HMAC_SECRET")
+  user_agent  = "bobshell/${env("BOB_VERSION")}"
+
+  models = ["premium"]
 }
 ```
 
@@ -90,16 +128,76 @@ too.
 
 If you only use a legacy `sk-`/`pk-` key the proxy does not need this secret.
 
+## Login / SSO
+
+For operators who have browser access to the IBM Bob SSO page and do not
+hold a static API key, `llm-proxy ibm-bob login` runs the Authorization
+Code flow and persists the resulting JWT + Refresh Token to disk:
+
+```sh
+llm-proxy ibm-bob login -c /path/to/config.hcl
+```
+
+The command:
+1. Starts a local HTTP callback server on a random port.
+2. Prints the IBM Bob login URL (or opens it with `--browser` / `-b`).
+3. Waits for the browser redirect and exchanges the one-time code for a
+   token pair.
+4. Writes `<user-cache-dir>/llm-proxy/ibmbob_<name>_token.json` (mode 0600).
+
+**Token refresh**: The proxy refreshes an expiring SSO token automatically
+on the next request (5-minute pre-emptive window), using the `refresh_token`
+stored alongside the access token. No restart is required.
+
+**Manual reload**: To force the proxy to re-read the token file immediately
+(e.g. after `llm-proxy ibm-bob login` from another terminal):
+
+```sh
+kill -HUP <proxy-pid>
+```
+
+The HTTP listener is not restarted; only the in-memory credential cache is
+cleared. The next request re-reads the file from disk.
+
+**Token file location** (`<name>` is the HCL block label):
+
+| Platform | Path |
+| -------- | ---- |
+| Linux    | `~/.cache/llm-proxy/ibmbob_<name>_token.json` |
+| macOS    | `~/Library/Caches/llm-proxy/ibmbob_<name>_token.json` |
+| Windows  | `%LocalAppData%\llm-proxy\ibmbob_<name>_token.json` |
+
+**Flags:**
+
+| Flag | Description |
+| ---- | ----------- |
+| `-b` / `--browser` | Open the URL in your default browser automatically |
+| `-c` / `--config`  | Path to HCL Configuration (same as `serve`) |
+
 ## Optional configuration
 
 ```hcl
 backend "bob" {
   type        = "ibm-bob"
-  api_key     = env("BOBSHELL_API_KEY")
+  api_key     = env("BOBSHELL_API_KEY")  # omit for SSO mode
   hmac_secret = env("BOB_HMAC_SECRET")
 
   # Override the auto-selected upstream host (rare).
   # api_base = "https://api.dev.bob.ibm.com"
+
+  # Override the SSO token endpoint origin independently of api_base.
+  # Only needed when the auth host differs from the inference host.
+  # sso_auth_base = "https://auth.bob.ibm.com"
+
+  # Override the browser-facing login page URL used during `llm-proxy ibm-bob login`.
+  # Defaults to the canonical front-end URL for the configured api_base host
+  # (https://bob.ibm.com/login for api.us-east.bob.ibm.com, etc.).
+  # Only needed when deploying against a non-standard Bob environment.
+  # sso_login_base = "https://bob.ibm.com/login"
+
+  # Forward-compatibility: sent in token requests if IBM later requires a
+  # client_id. Leave empty for current production endpoints.
+  # sso_client_id = ""
 
   # Pin the instance/team ids and skip the /admin/v1/profile derivation.
   # When unset, the proxy fetches the profile on first use and chooses the

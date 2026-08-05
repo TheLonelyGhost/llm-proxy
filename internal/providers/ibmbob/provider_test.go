@@ -49,9 +49,11 @@ func makeJWTKey() string {
 }
 
 func TestNew_RequiresAPIKey(t *testing.T) {
+	// Without api_key and without hmac_secret the provider must fail because
+	// SSO mode still requires hmac_secret for the modern backend.
 	block := buildBlock(t, ``)
-	if _, err := ibmbob.New(block, ibmbob.Options{}); err == nil || !strings.Contains(err.Error(), "api_key is required") {
-		t.Fatalf("err = %v", err)
+	if _, err := ibmbob.New(block, ibmbob.Options{}); err == nil || !strings.Contains(err.Error(), "hmac_secret") {
+		t.Fatalf("expected hmac_secret error for empty config, got: %v", err)
 	}
 }
 
@@ -738,3 +740,124 @@ func (f *fakeBackend) handleCompletion(w http.ResponseWriter, r *http.Request) {
 var (
 	_ = json.Marshal
 )
+
+// --- SSO tests ---
+
+func TestNew_SSO_RequiresHMACSecret(t *testing.T) {
+	// SSO mode (no api_key) still requires hmac_secret for the modern backend.
+	tokenDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", tokenDir)
+	block := buildBlock(t, `api_base = "http://127.0.0.1:1"`)
+	_, err := ibmbob.New(block, ibmbob.Options{})
+	if err == nil || !strings.Contains(err.Error(), "hmac_secret") {
+		t.Fatalf("expected hmac_secret error, got: %v", err)
+	}
+}
+
+func TestNew_SSO_LoadsTokenFromDisk(t *testing.T) {
+	tokenDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", tokenDir)
+
+	valid := &ibmbob.SSOToken{
+		AccessToken: "disk-sso-token",
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}
+	tokenPath := filepath.Join(tokenDir, "ibmbob_bob_token.json")
+	b, _ := json.Marshal(valid)
+	if err := os.WriteFile(tokenPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	block := buildBlock(t, `hmac_secret = "s"`)
+	p, err := ibmbob.New(block, ibmbob.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.CurrentAccessToken(); got != "disk-sso-token" {
+		t.Errorf("CurrentAccessToken = %q, want disk-sso-token", got)
+	}
+}
+
+func TestNew_SSO_MissingTokenFile_OK(t *testing.T) {
+	// Missing token file is not fatal at New() time.
+	tokenDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", tokenDir)
+	block := buildBlock(t, `hmac_secret = "s"`)
+	_, err := ibmbob.New(block, ibmbob.Options{})
+	if err != nil {
+		t.Fatalf("New should succeed with missing token file: %v", err)
+	}
+}
+
+func TestForward_SSOTokenUsed(t *testing.T) {
+	// When an in-memory SSO token is cached, it should be used in the
+	// Authorization header instead of the (absent) static api_key.
+	tokenDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", tokenDir)
+
+	var capturedAuth string
+	fb := &fakeBackend{t: t, expectSign: true, expectInstance: "inst-1", expectTeam: "team-1"}
+	fb.hmacSecret = []byte("topsecret")
+	fb.profileResp = `{"instances":[{"instance_id":"inst-1","teams":[{"id":"team-1"}]}]}`
+	fb.chatResp = `{"id":"x"}`
+	fb.chatHandlerOverride = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		// Still validate signing.
+		fb.verifyHeaders(r)
+		atomic.AddInt32(&fb.chatCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, fb.chatResp) //nolint:errcheck
+	})
+	srv := startFake(t, fb)
+
+	block := buildBlock(t, fmt.Sprintf(
+		"hmac_secret = \"topsecret\"\napi_base = %q\nmodels = [\"premium\"]",
+		srv.URL,
+	))
+	p, err := ibmbob.New(block, ibmbob.Options{Now: fixedNow()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed in-memory SSO token.
+	ssoTok := &ibmbob.SSOToken{
+		AccessToken: makeJWTKey(), // a JWT-shaped token
+		ExpiresAt:   time.Now().Add(1 * time.Hour),
+	}
+	p.SetCachedSSO(ssoTok)
+
+	resp, err := p.Chat(context.Background(), backend.ChatRequest{
+		Model: "premium",
+		Body:  []byte(`{"model":"premium","messages":[]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if !strings.HasPrefix(capturedAuth, "Bearer ") {
+		t.Errorf("Authorization = %q; SSO token should use Bearer scheme", capturedAuth)
+	}
+	if !strings.Contains(capturedAuth, ssoTok.AccessToken) {
+		t.Errorf("Authorization %q does not contain SSO access token", capturedAuth)
+	}
+}
+
+func TestReloadSSO_DropsCache(t *testing.T) {
+	tokenDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", tokenDir)
+
+	block := buildBlock(t, `hmac_secret = "s"`)
+	p, err := ibmbob.New(block, ibmbob.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetCachedSSO(&ibmbob.SSOToken{AccessToken: "cached", ExpiresAt: time.Now().Add(time.Hour)})
+
+	// Reload must clear the in-memory cache.
+	p.Reload()
+
+	if got := p.CurrentAccessToken(); got != "" {
+		t.Errorf("after Reload, CurrentAccessToken = %q, want empty", got)
+	}
+}

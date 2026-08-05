@@ -95,6 +95,30 @@ func newServeCmd(out io.Writer) *cobra.Command {
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
+
+			// SIGHUP: reload on-disk SSO credentials for any backend that
+			// implements the Reloadable extension, without restarting the
+			// HTTP listener.
+			sighupCh := make(chan os.Signal, 1)
+			signal.Notify(sighupCh, syscall.SIGHUP)
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-sighupCh:
+						logger.Info("SIGHUP received: reloading SSO credential caches")
+						for _, name := range reg.Names() {
+							if b, ok := reg.Get(name); ok {
+								if r, ok := b.(backend.Reloadable); ok {
+									r.Reload()
+								}
+							}
+						}
+					}
+				}
+			}()
+
 			return srv.Run(ctx)
 		},
 	}

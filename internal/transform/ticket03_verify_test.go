@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/thelonelyghost/llm-proxy/internal/backend"
 )
 
 // helper: drain the result body and unmarshal as an OpenAI error envelope.
@@ -26,13 +28,22 @@ func readErrorEnvelope(t *testing.T, r *TransformResult) ErrorResponse {
 	return env
 }
 
-// --- TransformChatResponse ---
+// ticket03Resp wraps statusCode + body string into a *backend.Response.
+func ticket03Resp(statusCode int, body string) *backend.Response {
+	return &backend.Response{
+		StatusCode: statusCode,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+// --- Chat ---
 
 func TestVerify_Ticket03_Chat_429_PropagatesStatus(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(
-		`{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`,
-	))
-	result, err := TransformChatResponse(http.StatusTooManyRequests, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusTooManyRequests, `{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}`),
+		EndpointChat, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -46,8 +57,10 @@ func TestVerify_Ticket03_Chat_429_PropagatesStatus(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Chat_503_PropagatesStatus(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"service unavailable"}}`))
-	result, err := TransformChatResponse(http.StatusServiceUnavailable, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusServiceUnavailable, `{"error":{"message":"service unavailable"}}`),
+		EndpointChat, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -57,8 +70,10 @@ func TestVerify_Ticket03_Chat_503_PropagatesStatus(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Chat_ErrorBody_IsJSON_NotSSE(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"forbidden"}}`))
-	result, err := TransformChatResponse(http.StatusForbidden, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusForbidden, `{"error":{"message":"forbidden"}}`),
+		EndpointChat, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,13 +81,14 @@ func TestVerify_Ticket03_Chat_ErrorBody_IsJSON_NotSSE(t *testing.T) {
 	if !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type: got %q, want application/json", ct)
 	}
-	// Body must parse as an error envelope, not as an SSE stream.
 	readErrorEnvelope(t, result)
 }
 
 func TestVerify_Ticket03_Chat_200_StillReturnsSSEStream(t *testing.T) {
-	body := io.NopCloser(strings.NewReader("data: {\"id\":\"1\",\"choices\":[]}\n\n"))
-	result, err := TransformChatResponse(http.StatusOK, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusOK, "data: {\"id\":\"1\",\"choices\":[]}\n\n"),
+		EndpointChat, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,11 +101,13 @@ func TestVerify_Ticket03_Chat_200_StillReturnsSSEStream(t *testing.T) {
 	}
 }
 
-// --- TransformCompletionResponse ---
+// --- Completion ---
 
 func TestVerify_Ticket03_Completion_429_PropagatesStatus(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"rate limit exceeded"}}`))
-	result, err := TransformCompletionResponse(http.StatusTooManyRequests, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusTooManyRequests, `{"error":{"message":"rate limit exceeded"}}`),
+		EndpointCompletion, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,8 +118,10 @@ func TestVerify_Ticket03_Completion_429_PropagatesStatus(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Completion_503_PropagatesStatus(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"service unavailable"}}`))
-	result, err := TransformCompletionResponse(http.StatusServiceUnavailable, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusServiceUnavailable, `{"error":{"message":"service unavailable"}}`),
+		EndpointCompletion, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,8 +131,10 @@ func TestVerify_Ticket03_Completion_503_PropagatesStatus(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Completion_ErrorBody_IsJSON_NotSSE(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"forbidden"}}`))
-	result, err := TransformCompletionResponse(http.StatusForbidden, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusForbidden, `{"error":{"message":"forbidden"}}`),
+		EndpointCompletion, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,8 +146,10 @@ func TestVerify_Ticket03_Completion_ErrorBody_IsJSON_NotSSE(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Completion_200_StillReturnsSSEStream(t *testing.T) {
-	body := io.NopCloser(strings.NewReader("data: {\"id\":\"1\",\"choices\":[]}\n\n"))
-	result, err := TransformCompletionResponse(http.StatusOK, body, true, "test/model")
+	result, err := Transform(
+		ticket03Resp(http.StatusOK, "data: {\"id\":\"1\",\"choices\":[]}\n\n"),
+		EndpointCompletion, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,11 +162,13 @@ func TestVerify_Ticket03_Completion_200_StillReturnsSSEStream(t *testing.T) {
 	}
 }
 
-// --- TransformResponsesResponse ---
+// --- Responses ---
 
 func TestVerify_Ticket03_Responses_429_PropagatesStatus(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"rate limit exceeded"}}`))
-	result, err := TransformResponsesResponse(http.StatusTooManyRequests, body, true, "test/model", nil)
+	result, err := Transform(
+		ticket03Resp(http.StatusTooManyRequests, `{"error":{"message":"rate limit exceeded"}}`),
+		EndpointResponses, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -153,8 +179,10 @@ func TestVerify_Ticket03_Responses_429_PropagatesStatus(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Responses_503_PropagatesStatus(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"service unavailable"}}`))
-	result, err := TransformResponsesResponse(http.StatusServiceUnavailable, body, true, "test/model", nil)
+	result, err := Transform(
+		ticket03Resp(http.StatusServiceUnavailable, `{"error":{"message":"service unavailable"}}`),
+		EndpointResponses, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,8 +192,10 @@ func TestVerify_Ticket03_Responses_503_PropagatesStatus(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Responses_ErrorBody_IsJSON_NotSSE(t *testing.T) {
-	body := io.NopCloser(strings.NewReader(`{"error":{"message":"forbidden"}}`))
-	result, err := TransformResponsesResponse(http.StatusForbidden, body, true, "test/model", nil)
+	result, err := Transform(
+		ticket03Resp(http.StatusForbidden, `{"error":{"message":"forbidden"}}`),
+		EndpointResponses, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,8 +207,10 @@ func TestVerify_Ticket03_Responses_ErrorBody_IsJSON_NotSSE(t *testing.T) {
 }
 
 func TestVerify_Ticket03_Responses_200_StillReturnsSSEStream(t *testing.T) {
-	body := io.NopCloser(strings.NewReader("event: response.created\ndata: {\"type\":\"response.created\"}\n\n"))
-	result, err := TransformResponsesResponse(http.StatusOK, body, true, "test/model", nil)
+	result, err := Transform(
+		ticket03Resp(http.StatusOK, "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"),
+		EndpointResponses, true, "test/model",
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

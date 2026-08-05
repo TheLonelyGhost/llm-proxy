@@ -1,9 +1,7 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,15 +16,6 @@ import (
 // maxBodyBytes caps the size of incoming JSON bodies. 8 MiB is generous for
 // chat payloads while preventing slowloris-style memory exhaustion.
 const maxBodyBytes = 8 << 20
-
-type endpointType int
-
-const (
-	endpointChat endpointType = iota
-	endpointCompletion
-	endpointEmbedding
-	endpointResponses
-)
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -238,38 +227,6 @@ func (s *Server) writeBudgetError(w http.ResponseWriter, name string, err error)
 	}
 }
 
-// extractModel decodes just enough of the body to find the "model" field,
-// then rewrites it in place to the canonical (prefix-stripped) id and
-// returns the parsed Route alongside the rewritten bytes.
-func extractAndRewriteModel(body []byte) (router.Route, bool, []byte, error) {
-	var probe struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream,omitempty"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		return router.Route{}, false, nil, fmt.Errorf("invalid JSON body: %w", err)
-	}
-	if probe.Model == "" {
-		return router.Route{}, false, nil, errors.New("request missing required field \"model\"")
-	}
-	route, err := router.Parse(probe.Model)
-	if err != nil {
-		return router.Route{}, false, nil, err
-	}
-
-	// Rewrite "model" in a generic map to preserve unknown fields.
-	generic := map[string]any{}
-	if err := json.Unmarshal(body, &generic); err != nil {
-		return router.Route{}, false, nil, fmt.Errorf("invalid JSON body: %w", err)
-	}
-	generic["model"] = route.Model
-	rewritten, err := json.Marshal(generic)
-	if err != nil {
-		return router.Route{}, false, nil, fmt.Errorf("re-encode body: %w", err)
-	}
-	return route, probe.Stream, rewritten, nil
-}
-
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	body, err := io.ReadAll(r.Body)
@@ -292,19 +249,19 @@ func (s *Server) lookupBackend(w http.ResponseWriter, name string) (backend.Back
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, endpointChat, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+	s.handleModelRequest(w, r, transform.EndpointChat, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
 		return b.Chat(ctx, backend.ChatRequest{Model: route.Model, Stream: stream, Body: body})
 	})
 }
 
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, endpointCompletion, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+	s.handleModelRequest(w, r, transform.EndpointCompletion, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
 		return b.Complete(ctx, backend.CompletionRequest{Model: route.Model, Stream: stream, Body: body})
 	})
 }
 
 func (s *Server) handleEmbedding(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, endpointEmbedding, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, _ bool) (*backend.Response, error) {
+	s.handleModelRequest(w, r, transform.EndpointEmbedding, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, _ bool) (*backend.Response, error) {
 		return b.Embed(ctx, backend.EmbeddingRequest{Model: route.Model, Body: body})
 	})
 }
@@ -315,42 +272,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Model     string          `json:"model"`
-		Input     json.RawMessage `json:"input"`
-		Stream    bool            `json:"stream,omitempty"`
-		Reasoning *struct {
-			Effort string `json:"effort"`
-		} `json:"reasoning,omitempty"`
-	}
-
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON body")
-		return
-	}
-
-	if err := validateResponsesInput(req.Input); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-
-	if req.Model == "" {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "request missing required field \"model\"")
-		return
-	}
-
-	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		validEfforts := map[string]bool{
-			"none": true, "minimal": true, "low": true,
-			"medium": true, "high": true, "xhigh": true, "max": true,
-		}
-		if !validEfforts[req.Reasoning.Effort] {
-			writeAPIError(w, http.StatusBadRequest, "invalid_request_error", "reasoning.effort must be one of \"none\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", or \"max\"")
-			return
-		}
-	}
-
-	route, err := router.Parse(req.Model)
+	route, req, err := router.ParseResponsesRequest(body)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -361,77 +283,21 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rewritten := make(map[string]any)
-	if err := json.Unmarshal(body, &rewritten); err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "failed to parse request")
-		return
-	}
-	rewritten["model"] = route.Model
-	rewrittenBody, _ := json.Marshal(rewritten)
-
-	var reasoning *backend.Reasoning
-	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		reasoning = &backend.Reasoning{Effort: req.Reasoning.Effort}
-	}
-
-	resp, err := b.Responses(r.Context(), backend.ResponsesRequest{
-		Model:     route.Model,
-		Stream:    req.Stream,
-		Input:     req.Input,
-		Reasoning: reasoning,
-		Body:      rewrittenBody,
-	})
-
-	s.writeUpstreamResponse(w, resp, err, req.Stream, endpointResponses, router.Format(b.Name(), route.Model))
-}
-
-// validateResponsesInput enforces the OpenAI /v1/responses `input` contract:
-// the field must be present and either a JSON string or a JSON array whose
-// elements are JSON objects. Returns a client-facing error message on failure.
-func validateResponsesInput(raw json.RawMessage) error {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return errors.New("request missing required field \"input\"")
-	}
-
-	switch trimmed[0] {
-	case '"':
-		var s string
-		if err := json.Unmarshal(trimmed, &s); err != nil {
-			return errors.New("\"input\" must be a string or an array of input items")
-		}
-		if s == "" {
-			return errors.New("request missing required field \"input\"")
-		}
-		return nil
-	case '[':
-		var items []json.RawMessage
-		if err := json.Unmarshal(trimmed, &items); err != nil {
-			return errors.New("\"input\" must be a string or an array of input items")
-		}
-		for _, item := range items {
-			t := bytes.TrimSpace(item)
-			if len(t) == 0 || t[0] != '{' {
-				return errors.New("\"input\" array elements must be input-item objects")
-			}
-		}
-		return nil
-	default:
-		return errors.New("\"input\" must be a string or an array of input items")
-	}
+	resp, err := b.Responses(r.Context(), *req)
+	s.writeUpstreamResponse(w, resp, err, req.Stream, transform.EndpointResponses, router.Format(b.Name(), req.Model))
 }
 
 func (s *Server) handleModelRequest(
 	w http.ResponseWriter,
 	r *http.Request,
-	epType endpointType,
+	ep transform.Endpoint,
 	op func(context.Context, backend.Backend, router.Route, []byte, bool) (*backend.Response, error),
 ) {
 	body, ok := s.readBody(w, r)
 	if !ok {
 		return
 	}
-	route, stream, rewritten, err := extractAndRewriteModel(body)
+	route, stream, rewritten, err := router.ParseAndRewrite(body)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -441,12 +307,12 @@ func (s *Server) handleModelRequest(
 		return
 	}
 	resp, err := op(r.Context(), b, route, rewritten, stream)
-	s.writeUpstreamResponse(w, resp, err, stream, epType, router.Format(b.Name(), route.Model))
+	s.writeUpstreamResponse(w, resp, err, stream, ep, router.Format(b.Name(), route.Model))
 }
 
 // writeUpstreamResponse maps a backend.Response (or error) onto the client's
 // http.ResponseWriter, applying transformation and preserving streaming semantics.
-func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Response, err error, stream bool, epType endpointType, modelPrefix string) {
+func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Response, err error, stream bool, ep transform.Endpoint, modelPrefix string) {
 	if err != nil {
 		switch {
 		case errors.Is(err, backend.ErrUnsupported):
@@ -471,24 +337,7 @@ func (s *Server) writeUpstreamResponse(w http.ResponseWriter, resp *backend.Resp
 		s.logger.Info("upstream returned error status", "model", modelPrefix, "status", resp.StatusCode)
 	}
 
-	var transformed *transform.TransformResult
-	var transformErr error
-
-	switch epType {
-	case endpointChat:
-		transformed, transformErr = transform.TransformChatResponse(resp.StatusCode, resp.Body, stream, modelPrefix)
-	case endpointCompletion:
-		transformed, transformErr = transform.TransformCompletionResponse(resp.StatusCode, resp.Body, stream, modelPrefix)
-	case endpointEmbedding:
-		transformed, transformErr = transform.TransformEmbeddingResponse(resp.StatusCode, resp.Body, modelPrefix)
-	case endpointResponses:
-		transformed, transformErr = transform.TransformResponsesResponse(resp.StatusCode, resp.Body, stream, modelPrefix, resp.Header)
-	default:
-		s.logger.Error("unknown endpoint type in writeUpstreamResponse", "type", epType)
-		writeAPIError(w, http.StatusInternalServerError, "internal_error", "unknown endpoint type")
-		return
-	}
-
+	transformed, transformErr := transform.Transform(resp, ep, stream, modelPrefix)
 	if transformErr != nil {
 		s.logger.Error("response transformation failed", "model", modelPrefix, "status", resp.StatusCode, "err", transformErr)
 		writeAPIError(w, http.StatusBadGateway, "upstream_error", "failed to transform backend response")

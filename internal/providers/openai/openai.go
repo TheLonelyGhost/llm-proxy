@@ -145,38 +145,15 @@ func (p *Provider) Name() string { return p.name }
 func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
 	ctx, span := p.tracer.Start(ctx, "openai.models")
 	defer span.End()
-	// If no models configured, return empty list (allow-list mode)
-	if len(p.models) == 0 {
-		return nil, nil
-	}
 
-	// Get full model metadata from upstream
-	allModels, err := p.ListUpstreamModels(ctx)
+	models, err := backend.Filter(ctx, p.models, p)
 	if err != nil {
 		span.RecordError(err)
 		span.AddEvent("upstream model listing failed; using configured allow-list")
 		p.logger.Warn("openai model listing failed; using allow-list fallback", "backend", p.name, "err", err)
-		// Fallback to minimal ModelInfo if upstream query fails
-		out := make([]backend.ModelInfo, 0, len(p.models))
-		for _, m := range p.models {
-			out = append(out, backend.ModelInfo{ID: m, Vendor: p.name})
-		}
-		return out, nil
+		return backend.StubModels(p.models, p.name), nil
 	}
-
-	// Filter to configured allow-list
-	modelSet := make(map[string]bool, len(p.models))
-	for _, m := range p.models {
-		modelSet[m] = true
-	}
-
-	out := make([]backend.ModelInfo, 0, len(p.models))
-	for _, info := range allModels {
-		if modelSet[info.ID] {
-			out = append(out, info)
-		}
-	}
-	return out, nil
+	return models, nil
 }
 
 func (p *Provider) allowed(model string) error {

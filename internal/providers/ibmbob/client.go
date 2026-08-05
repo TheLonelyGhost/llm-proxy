@@ -126,7 +126,9 @@ func (p *Provider) setHeaders(req *http.Request, pathAndQuery string, body []byt
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", p.settings.UserAgent)
-	req.Header.Set("Authorization", AuthorizationHeader(p.settings.APIKey, p.keyKind))
+
+	cred, kind := p.currentCredential()
+	req.Header.Set("Authorization", AuthorizationHeader(cred, kind))
 
 	id := p.currentIdentity()
 	if id.InstanceID != "" {
@@ -246,7 +248,8 @@ func (p *Provider) fetchIdentity(ctx context.Context) (Identity, error) {
 	// setHeaders without any body bytes.
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", p.settings.UserAgent)
-	req.Header.Set("Authorization", AuthorizationHeader(p.settings.APIKey, p.keyKind))
+	fetchCred, fetchKind := p.currentCredential()
+	req.Header.Set("Authorization", AuthorizationHeader(fetchCred, fetchKind))
 	if len(p.hmacSecret) > 0 && shouldSignURL(target, p.baseURL) {
 		sig := SignRequest(http.MethodGet, pathAndQuery, nil, p.hmacSecret, p.now())
 		req.Header.Set("x-request-timestamp", sig.Timestamp)
@@ -328,7 +331,7 @@ func pickIdentity(body []byte, requestedInstance, requestedTeam string) (Identit
 	return id, nil
 }
 
-func truncate(s string, n int) string {
+func truncate(s string, n int) string { //nolint:unparam // n is always 200 today; kept for readability at call sites
 	if len(s) <= n {
 		return s
 	}

@@ -124,6 +124,7 @@ The proxy is deliberately near-stateless. The only files it writes are:
 | ------------------------------------------------------------- | --------------------------------------- | ----------- |
 | `<user-config-dir>/llm-proxy/github_token.json`               | Long-lived GitHub OAuth token           | 0600        |
 | `<user-cache-dir>/llm-proxy/copilot_token.json`               | Short-lived (refreshed) Copilot token   | 0600        |
+| `<user-cache-dir>/llm-proxy/ibmbob_<name>_token.json`         | IBM Bob SSO access + refresh tokens     | 0600        |
 
 `<user-config-dir>` and `<user-cache-dir>` follow Go's `os.UserConfigDir` /
 `os.UserCacheDir` semantics:

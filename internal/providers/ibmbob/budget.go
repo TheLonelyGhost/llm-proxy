@@ -90,7 +90,8 @@ func (p *Provider) fetchProfileBody(ctx context.Context) ([]byte, error) {
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", p.settings.UserAgent)
-	req.Header.Set("Authorization", AuthorizationHeader(p.settings.APIKey, p.keyKind))
+	budgetCred, budgetKind := p.currentCredential()
+	req.Header.Set("Authorization", AuthorizationHeader(budgetCred, budgetKind))
 	id := p.currentIdentity()
 	if id.InstanceID != "" {
 		req.Header.Set("x-instance-id", id.InstanceID)

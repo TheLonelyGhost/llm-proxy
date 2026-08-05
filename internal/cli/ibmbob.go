@@ -6,9 +6,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
+	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/paths"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/ibmbob"
 )
 
@@ -18,11 +22,12 @@ func newIBMBobCmd(out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ibm-bob",
 		Short: "Maintainer helpers for the IBM Bob backend",
-		Long: "Subcommands that operate on a locally installed `bob` CLI - " +
-			"intended for one-off use when configuring the IBM Bob backend " +
+		Long: "Subcommands that operate on the IBM Bob backend - " +
+			"including credential management and secret extraction " +
 			"(see docs/providers/ibm-bob.md).",
 	}
 	cmd.AddCommand(newIBMBobExtractCmd(out))
+	cmd.AddCommand(newIBMBobLoginCmd(out))
 	return cmd
 }
 
@@ -109,4 +114,96 @@ func writeExtractResult(out io.Writer, outputPath string, env bool, s ibmbob.Ext
 	}
 	fmt.Fprintf(out, "wrote %s (version=%s)\n", outputPath, s.Version) //nolint:errcheck
 	return nil
+}
+
+// newIBMBobLoginCmd implements `llm-proxy ibm-bob login`.
+//
+// It runs the IBM Bob browser Authorization Code flow: starts a local
+// callback server, prints (or opens) the login URL, waits for the browser
+// redirect, exchanges the one-time code for a token pair, and writes it to
+// the user's cache directory with mode 0600.
+func newIBMBobLoginCmd(out io.Writer) *cobra.Command {
+	var (
+		cfgPath     string
+		openBrowser bool
+	)
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "Authenticate with IBM Bob via browser SSO",
+		Long: "Starts a local callback server, prints the IBM Bob SSO login URL\n" +
+			"(or opens it in the default browser with --browser), waits for the\n" +
+			"browser redirect, and exchanges the one-time code for a token pair\n" +
+			"that is written to the user cache directory (mode 0600).\n\n" +
+			"The running proxy picks up the new token on the next request or\n" +
+			"immediately when it receives SIGHUP.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := loadConfig(cmd, cfgPath)
+			if err != nil {
+				return err
+			}
+			block, err := findIBMBobBlock(cfg)
+			if err != nil {
+				return err
+			}
+			p, err := ibmbob.New(*block, ibmbob.Options{Name: block.Name, Models: block.Models})
+			if err != nil {
+				return err
+			}
+
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			return p.Login(ctx, func(loginURL string) {
+				if openBrowser {
+					if berr := openBrowserURL(loginURL); berr != nil {
+						fmt.Fprintf(out, "Could not open browser (%v). Open this URL manually:\n\n  %s\n\n", berr, loginURL) //nolint:errcheck
+						return
+					}
+				}
+				fmt.Fprintf(out, "\nOpen this URL in your browser:\n\n  %s\n\nWaiting for authentication...\n", loginURL) //nolint:errcheck
+			})
+		},
+	}
+	var cfgDefault string
+	if p, err2 := paths.ConfigFile(); err2 == nil {
+		cfgDefault = p
+	} else {
+		cfgDefault = defaultConfigPath()
+	}
+	cmd.Flags().StringVarP(&cfgPath, "config", "c", cfgDefault,
+		"path to HCL config file or directory (or set LLM_PROXY_CONFIG)")
+	cmd.Flags().BoolVarP(&openBrowser, "browser", "b", false,
+		"open the IBM Bob SSO URL in the default browser automatically")
+	return cmd
+}
+
+// findIBMBobBlock returns the first IBM Bob backend block from cfg.
+func findIBMBobBlock(cfg *config.Config) (*config.BackendBlock, error) {
+	for i, b := range cfg.Backends {
+		if b.Type == ibmbob.Type {
+			return &cfg.Backends[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no backend of type %q found in config", ibmbob.Type)
+}
+
+// openBrowserURL attempts to open url in the system default browser.
+func openBrowserURL(rawURL string) error {
+	var cmd *exec.Cmd
+	switch {
+	case commandExists("xdg-open"):
+		cmd = exec.Command("xdg-open", rawURL) //nolint:gosec // operator-controlled URL for browser open
+	case commandExists("open"):
+		cmd = exec.Command("open", rawURL) //nolint:gosec // operator-controlled URL for browser open
+	case commandExists("start"):
+		cmd = exec.Command("cmd", "/c", "start", rawURL) //nolint:gosec // operator-controlled URL for browser open
+	default:
+		return fmt.Errorf("no browser-open command found")
+	}
+	return cmd.Start()
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
