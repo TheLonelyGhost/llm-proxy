@@ -24,6 +24,7 @@ import (
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/httplog"
+	"github.com/thelonelyghost/llm-proxy/internal/modelcache"
 	"github.com/thelonelyghost/llm-proxy/internal/responsesshim"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
@@ -104,13 +105,14 @@ func (s *Settings) resolveTimeout() (time.Duration, error) {
 
 // Provider is the Backend implementation for GitHub Copilot.
 type Provider struct {
-	name     string
-	settings Settings
-	models   []string
-	auth     *Authenticator
-	http     *http.Client
-	logger   *slog.Logger
-	tracer   trace.Tracer
+	name       string
+	settings   Settings
+	allowList  backend.AllowList
+	auth       *Authenticator
+	http       *http.Client
+	logger     *slog.Logger
+	tracer     trace.Tracer
+	modelCache *modelcache.WrappedFunc
 }
 
 // Options are inputs to New that come from outside the HCL block (paths,
@@ -198,15 +200,17 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		models = block.Models
 	}
 
-	return &Provider{
-		name:     name,
-		settings: s,
-		models:   models,
-		auth:     auth,
-		http:     client,
-		logger:   logger,
-		tracer:   tracer,
-	}, nil
+	p := &Provider{
+		name:      name,
+		settings:  s,
+		allowList: backend.NewAllowList(models),
+		auth:      auth,
+		http:      client,
+		logger:    logger,
+		tracer:    tracer,
+	}
+	p.modelCache = modelcache.NewWrappedFunc(name, modelcache.DefaultTTL, logger, p.ListUpstreamModels)
+	return p, nil
 }
 
 // Name returns the routing prefix for this backend.
@@ -216,46 +220,51 @@ func (p *Provider) Name() string { return p.name }
 // CLI subcommands.
 func (p *Provider) Auth() *Authenticator { return p.auth }
 
-// Models returns the configured allow-list. If empty, the proxy refuses to
-// list models for this backend; clients may still address it explicitly.
-//
-// We intentionally do not query Copilot's /models endpoint here because the
-// upstream list churns and depends on the user's entitlement; operators
-// should pin the models they trust in HCL.
+// Models returns the allow-listed models for this backend, enriched with
+// upstream metadata from the Model Catalogue Cache. The unfiltered upstream
+// list is fetched from cache (in-memory → disk → upstream) and the
+// Model Allow-List is applied after retrieval.
 func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
 	ctx, span := p.tracer.Start(ctx, "copilot.models")
 	defer span.End()
 
-	models, err := backend.Filter(ctx, p.models, p)
-	if err != nil {
-		span.RecordError(err)
-		span.AddEvent("upstream model listing failed; using configured allow-list")
-		p.logger.Warn("copilot model listing failed; using allow-list fallback", "backend", p.name, "err", err)
-		return backend.StubModels(p.models, p.name), nil
+	models, _ := p.allowList.Models(ctx, p.modelCache)
+	// Re-stamp vendor with the backend name, which AllowList stubs leave empty.
+	for i := range models {
+		if models[i].Vendor == "" {
+			models[i].Vendor = p.name
+		}
 	}
+	span.AddEvent("models listed")
 	return models, nil
+}
+
+// Reload implements [backend.Reloadable]. It clears the in-memory model
+// catalogue cache so the next Models() call performs a fresh upstream fetch.
+func (p *Provider) Reload() {
+	p.modelCache.Invalidate()
 }
 
 // Chat forwards a chat-completions request to Copilot.
 func (p *Provider) Chat(ctx context.Context, req backend.ChatRequest) (*backend.Response, error) {
-	if err := p.allowed(req.Model); err != nil {
-		return nil, err
+	if err := p.allowList.Allowed(req.Model); err != nil {
+		return nil, fmt.Errorf("%w (backend %q)", err, p.name)
 	}
 	return p.forward(ctx, "POST", "/chat/completions", req.Body, req.Stream)
 }
 
 // Complete forwards a legacy completions request to Copilot.
 func (p *Provider) Complete(ctx context.Context, req backend.CompletionRequest) (*backend.Response, error) {
-	if err := p.allowed(req.Model); err != nil {
-		return nil, err
+	if err := p.allowList.Allowed(req.Model); err != nil {
+		return nil, fmt.Errorf("%w (backend %q)", err, p.name)
 	}
 	return p.forward(ctx, "POST", "/completions", req.Body, req.Stream)
 }
 
 // Embed forwards an embeddings request to Copilot.
 func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*backend.Response, error) {
-	if err := p.allowed(req.Model); err != nil {
-		return nil, err
+	if err := p.allowList.Allowed(req.Model); err != nil {
+		return nil, fmt.Errorf("%w (backend %q)", err, p.name)
 	}
 	return p.forward(ctx, "POST", "/embeddings", req.Body, false)
 }
@@ -265,25 +274,11 @@ func (p *Provider) Embed(ctx context.Context, req backend.EmbeddingRequest) (*ba
 // translating the response (JSON or SSE) back into the Responses API shape.
 // See internal/responsesshim for the supported subset and explicit non-goals.
 func (p *Provider) Responses(ctx context.Context, req backend.ResponsesRequest) (*backend.Response, error) {
-	if err := p.allowed(req.Model); err != nil {
-		return nil, err
+	if err := p.allowList.Allowed(req.Model); err != nil {
+		return nil, fmt.Errorf("%w (backend %q)", err, p.name)
 	}
 	modelPrefix := p.name + "/" + req.Model
 	return responsesshim.Dispatch(ctx, req, modelPrefix, func(ctx context.Context, body []byte, stream bool) (*backend.Response, error) {
 		return p.forward(ctx, "POST", "/chat/completions", body, stream)
 	})
-}
-
-// allowed enforces the configured model allow-list. An empty allow-list
-// permits any model.
-func (p *Provider) allowed(model string) error {
-	if len(p.models) == 0 {
-		return nil
-	}
-	for _, m := range p.models {
-		if m == model {
-			return nil
-		}
-	}
-	return fmt.Errorf("%w: %q not in backend %q allow-list", backend.ErrUnknownModel, model, p.name)
 }

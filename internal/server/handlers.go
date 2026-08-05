@@ -249,55 +249,64 @@ func (s *Server) lookupBackend(w http.ResponseWriter, name string) (backend.Back
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, transform.EndpointChat, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
-		return b.Chat(ctx, backend.ChatRequest{Model: route.Model, Stream: stream, Body: body})
-	})
+	s.handleModelRequest(w, r, transform.EndpointChat,
+		parseStandard,
+		func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+			return b.Chat(ctx, backend.ChatRequest{Model: route.Model, Stream: stream, Body: body})
+		})
 }
 
 func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, transform.EndpointCompletion, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
-		return b.Complete(ctx, backend.CompletionRequest{Model: route.Model, Stream: stream, Body: body})
-	})
+	s.handleModelRequest(w, r, transform.EndpointCompletion,
+		parseStandard,
+		func(ctx context.Context, b backend.Backend, route router.Route, body []byte, stream bool) (*backend.Response, error) {
+			return b.Complete(ctx, backend.CompletionRequest{Model: route.Model, Stream: stream, Body: body})
+		})
 }
 
 func (s *Server) handleEmbedding(w http.ResponseWriter, r *http.Request) {
-	s.handleModelRequest(w, r, transform.EndpointEmbedding, func(ctx context.Context, b backend.Backend, route router.Route, body []byte, _ bool) (*backend.Response, error) {
-		return b.Embed(ctx, backend.EmbeddingRequest{Model: route.Model, Body: body})
-	})
+	s.handleModelRequest(w, r, transform.EndpointEmbedding,
+		parseStandard,
+		func(ctx context.Context, b backend.Backend, route router.Route, body []byte, _ bool) (*backend.Response, error) {
+			return b.Embed(ctx, backend.EmbeddingRequest{Model: route.Model, Body: body})
+		})
+}
+
+// parseStandard adapts router.ParseAndRewrite to the parseFunc signature
+// expected by handleModelRequest: (Route, body, stream, error).
+func parseStandard(body []byte) (router.Route, []byte, bool, error) {
+	route, stream, rewritten, err := router.ParseAndRewrite(body)
+	return route, rewritten, stream, err
 }
 
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
-	body, ok := s.readBody(w, r)
-	if !ok {
-		return
-	}
-
-	route, req, err := router.ParseResponsesRequest(body)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-
-	b, ok := s.lookupBackend(w, route.Backend)
-	if !ok {
-		return
-	}
-
-	resp, err := b.Responses(r.Context(), *req)
-	s.writeUpstreamResponse(w, resp, err, req.Stream, transform.EndpointResponses, router.Format(b.Name(), req.Model))
+	var parsed *backend.ResponsesRequest
+	s.handleModelRequest(w, r, transform.EndpointResponses,
+		func(body []byte) (router.Route, []byte, bool, error) {
+			route, req, err := router.ParseResponsesRequest(body)
+			if err != nil {
+				return router.Route{}, nil, false, err
+			}
+			parsed = req
+			return route, req.Body, req.Stream, nil
+		},
+		func(ctx context.Context, b backend.Backend, _ router.Route, _ []byte, _ bool) (*backend.Response, error) {
+			return b.Responses(ctx, *parsed)
+		})
 }
 
 func (s *Server) handleModelRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	ep transform.Endpoint,
+	parseBody func([]byte) (router.Route, []byte, bool, error),
 	op func(context.Context, backend.Backend, router.Route, []byte, bool) (*backend.Response, error),
 ) {
 	body, ok := s.readBody(w, r)
 	if !ok {
 		return
 	}
-	route, stream, rewritten, err := router.ParseAndRewrite(body)
+	route, rewritten, stream, err := parseBody(body)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return

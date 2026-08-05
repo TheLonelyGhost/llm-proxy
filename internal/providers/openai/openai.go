@@ -18,6 +18,7 @@ import (
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/httplog"
+	"github.com/thelonelyghost/llm-proxy/internal/modelcache"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
@@ -60,12 +61,13 @@ func (s *Settings) resolveTimeout() (time.Duration, error) {
 
 // Provider is the backend.Backend implementation for OpenAI-compatible APIs.
 type Provider struct {
-	name     string
-	settings Settings
-	models   []string
-	client   *http.Client
-	logger   *slog.Logger
-	tracer   trace.Tracer
+	name       string
+	settings   Settings
+	allowList  backend.AllowList
+	client     *http.Client
+	logger     *slog.Logger
+	tracer     trace.Tracer
+	modelCache *modelcache.WrappedFunc
 }
 
 // Options carries non-HCL inputs.
@@ -128,44 +130,48 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		models = block.Models
 	}
 
-	return &Provider{
-		name:     name,
-		settings: s,
-		models:   models,
-		client:   client,
-		logger:   logger,
-		tracer:   tracer,
-	}, nil
+	p := &Provider{
+		name:      name,
+		settings:  s,
+		allowList: backend.NewAllowList(models),
+		client:    client,
+		logger:    logger,
+		tracer:    tracer,
+	}
+	p.modelCache = modelcache.NewWrappedFunc(name, modelcache.DefaultTTL, logger, p.ListUpstreamModels)
+	return p, nil
 }
 
 // Name returns the routing prefix.
 func (p *Provider) Name() string { return p.name }
 
-// Models returns the configured allow-list with full metadata.
+// Models returns the allow-listed models with upstream metadata from the
+// Model Catalogue Cache.
 func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
 	ctx, span := p.tracer.Start(ctx, "openai.models")
 	defer span.End()
 
-	models, err := backend.Filter(ctx, p.models, p)
-	if err != nil {
-		span.RecordError(err)
-		span.AddEvent("upstream model listing failed; using configured allow-list")
-		p.logger.Warn("openai model listing failed; using allow-list fallback", "backend", p.name, "err", err)
-		return backend.StubModels(p.models, p.name), nil
+	models, _ := p.allowList.Models(ctx, p.modelCache)
+	for i := range models {
+		if models[i].Vendor == "" {
+			models[i].Vendor = p.name
+		}
 	}
+	span.AddEvent("models listed")
 	return models, nil
 }
 
+// Reload implements [backend.Reloadable]. It clears the in-memory model
+// catalogue cache so the next Models() call performs a fresh upstream fetch.
+func (p *Provider) Reload() {
+	p.modelCache.Invalidate()
+}
+
 func (p *Provider) allowed(model string) error {
-	if len(p.models) == 0 {
-		return nil
+	if err := p.allowList.Allowed(model); err != nil {
+		return fmt.Errorf("%w (backend %q)", err, p.name)
 	}
-	for _, m := range p.models {
-		if m == model {
-			return nil
-		}
-	}
-	return fmt.Errorf("%w: %q not in backend %q allow-list", backend.ErrUnknownModel, model, p.name)
+	return nil
 }
 
 // Chat forwards a chat-completions request to the OpenAI-compatible API.

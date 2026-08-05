@@ -1263,3 +1263,54 @@ func TestBodyLogging_StreamingResponse_NotCaptured(t *testing.T) {
 		t.Errorf("expected streaming response to be marked not-captured, got:\n%s", out)
 	}
 }
+
+func TestHandleResponses_BodyTooLarge_Returns413(t *testing.T) {
+	b := newFakeBackend("openai", []string{"o1"})
+	baseURL := startServer(t, b)
+
+	// Build a body slightly larger than maxBodyBytes (8 MiB).
+	// We use a JSON string value so the body is syntactically valid up to
+	// the size limit — the server must reject it before parsing.
+	const maxBodyBytes = 8 << 20
+	bigPayload := make([]byte, maxBodyBytes+1)
+	for i := range bigPayload {
+		bigPayload[i] = 'x'
+	}
+	reqBody := `{"model":"openai/o1","input":"` + string(bigPayload) + `"}`
+	resp, err := http.Post(baseURL+"/v1/responses", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 413, got %d, body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestHandleChat_BodyTooLarge_Returns413(t *testing.T) {
+	b := newFakeBackend("openai", []string{"gpt-4o"})
+	baseURL := startServer(t, b)
+
+	const maxBodyBytes = 8 << 20
+	bigPayload := make([]byte, maxBodyBytes+1)
+	for i := range bigPayload {
+		bigPayload[i] = 'x'
+	}
+	reqBody := `{"model":"openai/gpt-4o","messages":[{"role":"user","content":"` + string(bigPayload) + `"}]}`
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil {
+		t.Fatal("nil response")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 413, got %d, body=%s", resp.StatusCode, body)
+	}
+}

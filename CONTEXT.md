@@ -44,6 +44,18 @@ _Avoid_: model id (when the prefix-stripped form is meant), prefix-stripped id
 The set of Qualified Model IDs the proxy exposes to clients for a given backend. Derived by taking the upstream's available models, filtering through the Model Allow-List (if configured), and qualifying each ID with the Backend Name. Served via `GET /v1/models`.
 _Avoid_: aggregated model list, prefix-qualified model list
 
+**Upstream Model Catalogue**:
+The unfiltered list of `ModelInfo` records returned directly by a backend's upstream, before the Model Allow-List is applied. This is what the Model Catalogue Cache stores. Distinct from the Model Catalogue, which is the post-filter, prefix-qualified view served to clients.
+_Avoid_: raw model list, unfiltered models
+
+**Model Catalogue Cache**:
+The two-layer (in-memory + on-disk) store that holds the Upstream Model Catalogue for each backend, keyed by Backend Name. The disk layer survives process restarts; the in-memory layer eliminates disk reads for requests within the TTL window. Cache entries expire 24 hours after their `fetched_at` timestamp. Stored under `paths.CacheDir()` as one JSON file per backend (e.g. `models-copilot.json`). Not sensitive; files are written with mode 0644.
+_Avoid_: model cache, models cache, catalogue cache
+
+**Cache TTL**:
+The duration after which a Model Catalogue Cache entry is considered stale and must be re-fetched from the upstream. Currently 24 hours, measured from the `fetched_at` timestamp embedded in the cache file.
+_Avoid_: expiry, timeout, cache duration
+
 **Model Allow-List**:
 The operator-curated set of Canonical Model IDs a backend will expose to clients. Configured via the `models` attribute of a `backend` HCL block. When absent, the upstream catalogue is used unfiltered.
 _Avoid_: models list, allow-list (standalone)

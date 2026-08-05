@@ -279,13 +279,15 @@ func (p *Provider) Login(ctx context.Context, onURL func(string)) error {
 }
 
 // Reload clears the in-memory SSO credential cache so the next request
-// re-reads the token file from disk. Safe for concurrent use. Implements
-// backend.Reloadable.
+// re-reads the token file from disk, and invalidates the model catalogue
+// cache so the next Models() call performs a fresh upstream fetch.
+// Safe for concurrent use. Implements backend.Reloadable.
 func (p *Provider) Reload() {
 	p.ssoMu.Lock()
 	p.ssoCached = nil
 	p.ssoMu.Unlock()
-	p.logger.Info("ibmbob: SSO token cache cleared (SIGHUP)", "backend", p.name)
+	p.modelCache.Invalidate()
+	p.logger.Info("ibmbob: SSO token cache and model catalogue cache cleared (SIGHUP)", "backend", p.name)
 }
 
 // callbackServer holds the state for the local OAuth redirect listener.

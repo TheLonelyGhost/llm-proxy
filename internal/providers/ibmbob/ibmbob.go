@@ -28,6 +28,7 @@ import (
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/httplog"
+	"github.com/thelonelyghost/llm-proxy/internal/modelcache"
 	"github.com/thelonelyghost/llm-proxy/internal/paths"
 	"github.com/thelonelyghost/llm-proxy/internal/responsesshim"
 	"go.opentelemetry.io/otel/trace"
@@ -148,12 +149,12 @@ func (s *Settings) resolveRetryDelay() (time.Duration, error) {
 
 // Provider is the backend.Backend implementation.
 type Provider struct {
-	name     string
-	settings Settings
-	models   []string
-	client   *http.Client
-	logger   *slog.Logger
-	tracer   trace.Tracer
+	name      string
+	settings  Settings
+	allowList backend.AllowList
+	client    *http.Client
+	logger    *slog.Logger
+	tracer    trace.Tracer
 
 	keyKind      KeyKind
 	baseURL      string
@@ -177,6 +178,10 @@ type Provider struct {
 	// https://bob.ibm.com/login.  It is distinct from ssoAuthBase (the token
 	// endpoint origin) and must not be set to the API host.
 	loginURL string
+
+	// modelCache is the two-layer (in-memory + disk) cache for the unfiltered
+	// upstream model catalogue.
+	modelCache *modelcache.WrappedFunc
 
 	// now is overridable in tests for deterministic timestamps.
 	now func() time.Time
@@ -318,10 +323,10 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		}
 	}
 
-	return &Provider{
+	p := &Provider{
 		name:         name,
 		settings:     s,
-		models:       models,
+		allowList:    backend.NewAllowList(models),
 		client:       client,
 		logger:       logger,
 		tracer:       tracer,
@@ -338,7 +343,9 @@ func New(block config.BackendBlock, opts Options) (*Provider, error) {
 		loginURL:     loginURL,
 		tokenPath:    tokenPath,
 		ssoCached:    ssoCached,
-	}, nil
+	}
+	p.modelCache = modelcache.NewWrappedFunc(name, modelcache.DefaultTTL, logger, p.ListUpstreamModels)
+	return p, nil
 }
 
 // Name returns the routing prefix.
@@ -350,31 +357,27 @@ func (p *Provider) KeyKind() KeyKind { return p.keyKind }
 // BaseURL returns the resolved upstream base URL.
 func (p *Provider) BaseURL() string { return p.baseURL }
 
-// Models returns the configured allow-list with full metadata.
+// Models returns the allow-listed models with upstream metadata from the
+// Model Catalogue Cache.
 func (p *Provider) Models(ctx context.Context) ([]backend.ModelInfo, error) {
 	ctx, span := p.tracer.Start(ctx, "ibmbob.models")
 	defer span.End()
 
-	models, err := backend.Filter(ctx, p.models, p)
-	if err != nil {
-		span.RecordError(err)
-		span.AddEvent("upstream model listing failed; using configured allow-list")
-		p.logger.Warn("ibm bob model listing failed; using allow-list fallback", "backend", p.name, "err", err)
-		return backend.StubModels(p.models, p.name), nil
+	models, _ := p.allowList.Models(ctx, p.modelCache)
+	for i := range models {
+		if models[i].Vendor == "" {
+			models[i].Vendor = p.name
+		}
 	}
+	span.AddEvent("models listed")
 	return models, nil
 }
 
 func (p *Provider) allowed(model string) error {
-	if len(p.models) == 0 {
-		return nil
+	if err := p.allowList.Allowed(model); err != nil {
+		return fmt.Errorf("%w (backend %q)", err, p.name)
 	}
-	for _, m := range p.models {
-		if m == model {
-			return nil
-		}
-	}
-	return fmt.Errorf("%w: %q not in backend %q allow-list", backend.ErrUnknownModel, model, p.name)
+	return nil
 }
 
 // Chat forwards a chat-completions request to Bob.
