@@ -4,29 +4,18 @@ An authenticating proxy, exposing OpenAI-compatible API to front pluggable LLM b
 The proxy is intended to run on the same machine as coding agents using it, stripping
 any `Authorization` headers sent to it and injecting its own for each upstream provider.
 
-Currently supported backends:
-
-- **GitHub Copilot** (`type = "github-copilot"`)
-- **IBM Bob** (`type = "ibm-bob"`)
-- **OpenAI** (`type = "openai"`)
-
 ## Features
 
-- **OpenAI API Compliance**: All backend responses are transformed to match the
-  OpenAI API specification exactly, ensuring compatibility with any OpenAI client.
-- HCL2 configuration:
-  - single file _or_ directory of `*.hcl` files
-  - supports `env("NAME")` interpolation so secrets never need to live on disk
-- Prefix-based model routing (e.g. `copilot/gpt-4o`) so multiple backends can coexist
-  in one proxy.
-- Secure defaults:
-  - binds to `127.0.0.1:4980`
-  - refuses to silently default a backend
-  - enforces request body size limits
-  - never logs request bodies or tokens, unless explicitly enabled (troubleshooting)
-- Mostly stateless. Minimal state is preserved on-disk:
-  - GitHub OAuth token (required for GitHub Copilot)
-  - Short-lived, Copilot API token (required for GitHub Copilot)
+- **OpenAI API compliance** — all backend responses are normalised to the OpenAI API
+  specification, so any OpenAI-compatible client works without modification.
+- **Prefix-based model routing** — `<backend>/<model>` (e.g. `copilot/gpt-4o`) lets
+  multiple backends coexist in one proxy instance.
+- **HCL2 configuration** — single file or directory of `*.hcl` files; `env("NAME")`
+  interpolation keeps secrets out of source control.
+- **Plugin system** — out-of-process provider plugins are downloaded, verified, and
+  lifecycle-managed by the proxy.
+- **Secure defaults** — binds to `127.0.0.1:4980`; strips client `Authorization`
+  headers; enforces request body size limits; no backend silently defaulted.
 
 ## Quick start
 
@@ -34,132 +23,66 @@ Currently supported backends:
 # 1. Build
 task build
 
-# 2. Authorise the proxy with your GitHub Copilot subscription (one-time).
+# 2. Authorise the proxy with your provider (one-time, if the plugin requires it).
 ./bin/llm-proxy login --config examples/config.hcl
 
 # 3. Run the server.
 ./bin/llm-proxy serve --config examples/config.hcl
 
 # 4. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
-#    ask for a copilot-prefixed model.
+#    ask for a backend-prefixed model.
 curl http://127.0.0.1:4980/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"copilot/gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-See [`docs/configuration.md`](docs/configuration.md) for the full HCL schema.
+## Backends
 
-## Advanced Features
+| Backend | Type | Source |
+|---|---|---|
+| OpenAI-compatible | `openai` (built-in) | [docs/providers/openai.md](docs/providers/openai.md) |
+| GitHub Copilot | plugin | [llm-proxy-provider-copilot](https://github.com/thelonelyghost/llm-proxy-provider-copilot) |
+| IBM Bob | plugin | [llm-proxy-provider-ibmbob](https://github.com/thelonelyghost/llm-proxy-provider-ibmbob) |
 
-### Reasoning Models and /v1/responses
+Plugin backends are declared with a `plugin` block and installed with
+`llm-proxy plugin install` before starting the server. See
+[docs/plugins/index.md](docs/plugins/index.md) for the full plugin reference,
+and each plugin's own repository for provider-specific configuration,
+authentication, and tooling.
 
-The `/v1/responses` endpoint provides unified response objects with reasoning
-effort support for models like OpenAI o-series and GPT-5:
+Some plugins expose additional CLI tooling subcommands (e.g. login flows,
+secret extraction). Consult the plugin's documentation for details on which
+subcommands are available and whether any are required before first use.
 
-```sh
-curl http://127.0.0.1:4980/v1/responses \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "openai/o3",
-    "input": "What is the meaning of life?",
-    "reasoning": {"effort": "medium"}
-  }'
-```
+## Configuration
 
-The `reasoning.effort` parameter accepts `"none"`, `"minimal"`, `"low"`,
-`"medium"` (default), `"high"`, `"xhigh"`, or `"max"` to control the amount
-of reasoning tokens used. The response includes a `usage` object with
-`input_tokens`, `output_tokens`, and `total_tokens`.
+Configuration is HCL2 and supports a single file or a directory of `*.hcl`
+files. See [`docs/configuration.md`](docs/configuration.md) for the full
+schema, endpoint reference, routing rules, and security notes.
 
-### Model Capability Discovery
+## CLI reference
 
-The `/v1/model/info` endpoint returns extended model metadata including
-capabilities, token limits, and reasoning effort levels:
+| Command | Description |
+|---|---|
+| `llm-proxy serve` | Start the proxy server |
+| `llm-proxy providers list-models <backend>` | Query a backend's upstream model catalogue |
+| `llm-proxy plugin install` | Download and verify declared plugins |
+| `llm-proxy plugin run <label> <subcommand>` | Run a plugin tooling subcommand (e.g. `login`) |
 
-```sh
-curl http://127.0.0.1:4980/v1/model/info
-```
+Pass `-c` / `--config` to any command to specify a config file or directory.
+Run any command with `--help` for the full flag list.
 
-This helps clients discover which models support features like:
-
-- `chat` - Chat completion API
-- `tools` - Function calling
-- `vision` - Image inputs
-- `reasoning` - Chain-of-thought reasoning
-- `streaming` - SSE streaming
-- `embeddings` - Text embeddings
-
-Token limits (`max_input_tokens`, `max_output_tokens`, `max_context_tokens`)
-and reasoning effort levels are also exposed when available from the backend.
-
-**Note:** The standard `/v1/models` endpoint returns only OpenAI spec fields
-for maximum compatibility. Use `/v1/model/info` for extended metadata.
-
-## Listing upstream models
-
-To see which models a configured backend's upstream catalogue currently
-exposes (using the credentials the proxy already holds):
+## Development
 
 ```sh
-./bin/llm-proxy providers list-models <backend> -c examples/config.hcl
-```
-
-The positional argument is the HCL block label - for example `bob` when
-your config contains `backend "bob" { type = "ibm-bob" ... }`. Add
-`--verbose` to print supplemental metadata (vendor, capabilities, and any
-provider-specific extras) under each id, or `--json` for a machine-readable
-dump.
-
-This command explicitly ignores the `models = []` config so the operator can
-determine what models are available. This allows them to populate the allowlist.
-
-For the GitHub Copilot backend, models the upstream marks as
-`policy.state = "disabled"` are omitted.
-
-## Building
-
-`task build` compiles for the current platform; `task build:all` cross-compiles
-for the following supported platforms and architectures:
-
-- `linux` (`amd64`, `arm64`)
-- `darwin` (`amd64`, `arm64`)
-- `windows` (`amd64`, `arm64`)
-
-```sh
-task build         # bin/llm-proxy for host platform
-task build:all     # dist/llm-proxy-<os>-<arch>[.exe] for all supported targets
-```
-
-In all cases, CGO is disabled for maximum compatibility. (`CGO_ENABLED=0`)
-
-## Testing
-
-```sh
-task test          # unit tests with race detector and coverage
-task test:cover    # tests + enforces >= 80% coverage threshold
-task fuzz          # run fuzz targets (10 seconds each)
+task build         # compile for current platform
+task build:all     # cross-compile for all supported targets
 task check         # fmt + vet + lint + nilaway + govulncheck + test:cover
+task test:cover    # unit tests + 80% coverage threshold
 ```
 
-Fuzz targets live in `internal/config` (HCL loader) and `internal/router`
-(model id parser).
-
-## Project layout
-
-```
-.
-├── cmd/llm-proxy/       # main package
-├── internal/
-│   ├── backend/         # Backend interface and registry
-│   ├── cli/             # cobra subcommands: serve, login, logout, providers, version
-│   ├── config/          # HCL2 schema + loader (file or directory)
-│   ├── paths/           # platform-aware config/cache directory helpers
-│   ├── providers/       # LLM backend implementations
-│   ├── router/          # `<backend>/<model>` parsing
-│   └── server/          # HTTP front door
-├── docs/                # additional documentation
-└── examples/config.hcl  # sample configuration
-```
+See [`AGENTS.md`](AGENTS.md) for the full contributor workflow, architecture
+overview, and instructions for adding a new backend.
 
 ## License
 

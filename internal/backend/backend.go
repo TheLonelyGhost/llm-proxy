@@ -25,6 +25,10 @@ var ErrUnsupported = errors.New("capability not supported by backend")
 // that it does not recognise.
 var ErrUnknownModel = errors.New("unknown model")
 
+// ErrToolNotFound is returned by ToolRunner.RunTool when the requested tool
+// name is not registered in the backend's manifest.
+var ErrToolNotFound = errors.New("tool not found")
+
 // Model describes a single model exposed by a backend.
 //
 // Deprecated: Use ModelInfo instead. Will be removed in a future version.
@@ -178,6 +182,17 @@ type Budget struct {
 	Remaining float64           `json:"remaining"`
 	Unlimited bool              `json:"unlimited,omitempty"`
 	Extras    map[string]string `json:"extras,omitempty"`
+}
+
+// ToolRunner is an optional capability for backends (typically sidecar
+// plugins) that can execute named tooling subcommands. The backend runs the
+// tool out-of-process and returns its stdout as raw bytes.
+//
+// Implementations must return ErrToolNotFound when the requested tool name
+// is not registered by the backend. Any non-zero exit or execution error
+// should be returned as a plain error.
+type ToolRunner interface {
+	RunTool(ctx context.Context, toolName string) ([]byte, error)
 }
 
 // BudgetReporter is an optional capability for backends that expose a

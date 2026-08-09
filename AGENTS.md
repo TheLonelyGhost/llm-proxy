@@ -45,12 +45,20 @@ Other tools you must have on PATH:
    `docs/providers/`. If you change CLI flags or top-level behaviour, update
    `README.md`.
 
-5. **Do not weaken secure defaults.** The proxy binds to `127.0.0.1`, ignores
+5. **Maintain `CHANGELOG.md` for every end-user facing change.**
+   - All changes go under `## [Unreleased]` until a version tag is cut.
+   - Use Keep a Changelog subsection headings: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`.
+   - One bullet per feature/fix, one line. State what changed and what it means to the operator; omit implementation detail.
+   - **Breaking changes** get `**BREAKING:**` in the bullet and a `### Breaking Changes` summary at the top of the version section.
+   - Internal-only changes (refactors, tests, CI, doc-only) do **not** need an entry.
+   - On release: move `[Unreleased]` entries into a dated version section and update the comparison links.
+
+6. **Do not weaken secure defaults.** The proxy binds to `127.0.0.1`, ignores
    client `Authorization` headers, refuses to silently default a backend, and
    writes secrets with mode 0600 via `paths.WriteSecret`. Match these patterns
    in any new code.
 
-6. **Stateless by default.** Persist on the filesystem only when there is no
+7. **Stateless by default.** Persist on the filesystem only when there is no
    reasonable alternative (e.g., OAuth refresh tokens). Use
    `internal/paths.ConfigDir()` for long-lived credentials and
    `internal/paths.CacheDir()` for short-lived caches.

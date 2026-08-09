@@ -22,10 +22,35 @@ import (
 // Config is the top-level configuration document.
 type Config struct {
 	Server      *ServerBlock   `hcl:"server,block"`
+	Plugins     []PluginBlock  `hcl:"plugin,block"`
 	Backends    []BackendBlock `hcl:"backend,block"`
 	Remain      hcl.Body       `hcl:",remain"`
 	SourcePath  string         // Set by Load() for debugging/logging
 	SourceFiles []string       // Set by Load() for debugging/logging
+}
+
+// PluginBlock declares a sidecar plugin to be installed and managed by the proxy.
+type PluginBlock struct {
+	// Name is the block label — matches the Backend type field that references
+	// this plugin, and the directory name in the plugin cache.
+	Name string `hcl:",label"`
+	// Source is a go-getter compatible URL or GitHub shorthand
+	// (e.g. "github.com/org/llm-proxy-provider-foo").
+	Source string `hcl:"source"`
+	// Version is a version constraint or exact version string
+	// (e.g. "~> 1.0" or "1.2.3").
+	Version string `hcl:"version"`
+
+	// Health-check tuning (all optional; defaults applied by ApplyDefaults).
+	HealthInterval  string `hcl:"health_interval,optional"`
+	HealthTimeout   string `hcl:"health_timeout,optional"`
+	HealthThreshold int    `hcl:"health_threshold,optional"`
+
+	// Restart policy tuning (all optional; defaults applied by ApplyDefaults).
+	RestartPolicy         string `hcl:"restart_policy,optional"`
+	RestartMaxRetries     int    `hcl:"restart_max_retries,optional"`
+	RestartInitialBackoff string `hcl:"restart_initial_backoff,optional"`
+	RestartBackoffCap     string `hcl:"restart_backoff_cap,optional"`
 }
 
 // ServerBlock configures the HTTP listener.
@@ -43,6 +68,10 @@ type ServerBlock struct {
 	// PII. Default is false. Operators who flip this on MUST treat the proxy's
 	// log stream as a secret. Streaming response bodies are never logged.
 	LogBodies bool `hcl:"log_bodies,optional"`
+	// ShutdownTimeout is the maximum duration to wait for in-flight requests
+	// to drain before force-closing plugin processes on SIGTERM/SIGINT.
+	// Accepts a Go duration string (e.g. "30s"). Default is "30s".
+	ShutdownTimeout string `hcl:"shutdown_timeout,optional"`
 }
 
 // BackendBlock is a generic provider configuration. The block label is the
@@ -64,6 +93,17 @@ type BackendBlock struct {
 const (
 	DefaultAddress = "127.0.0.1"
 	DefaultPort    = 4980
+
+	DefaultShutdownTimeout = "30s"
+
+	DefaultPluginHealthInterval  = "10s"
+	DefaultPluginHealthTimeout   = "5s"
+	DefaultPluginHealthThreshold = 3
+
+	DefaultPluginRestartPolicy         = "on-failure"
+	DefaultPluginRestartMaxRetries     = 5
+	DefaultPluginRestartInitialBackoff = "1s"
+	DefaultPluginRestartBackoffCap     = "60s"
 )
 
 // ApplyDefaults fills in any unset server fields with secure defaults.
@@ -77,6 +117,33 @@ func (c *Config) ApplyDefaults() {
 	if c.Server.Port == 0 {
 		c.Server.Port = DefaultPort
 	}
+	if c.Server.ShutdownTimeout == "" {
+		c.Server.ShutdownTimeout = DefaultShutdownTimeout
+	}
+	for i := range c.Plugins {
+		p := &c.Plugins[i]
+		if p.HealthInterval == "" {
+			p.HealthInterval = DefaultPluginHealthInterval
+		}
+		if p.HealthTimeout == "" {
+			p.HealthTimeout = DefaultPluginHealthTimeout
+		}
+		if p.HealthThreshold == 0 {
+			p.HealthThreshold = DefaultPluginHealthThreshold
+		}
+		if p.RestartPolicy == "" {
+			p.RestartPolicy = DefaultPluginRestartPolicy
+		}
+		if p.RestartMaxRetries == 0 {
+			p.RestartMaxRetries = DefaultPluginRestartMaxRetries
+		}
+		if p.RestartInitialBackoff == "" {
+			p.RestartInitialBackoff = DefaultPluginRestartInitialBackoff
+		}
+		if p.RestartBackoffCap == "" {
+			p.RestartBackoffCap = DefaultPluginRestartBackoffCap
+		}
+	}
 }
 
 // Validate enforces invariants beyond what HCL syntax can express.
@@ -85,6 +152,22 @@ func (c *Config) Validate() error {
 		if c.Server.Port < 0 || c.Server.Port > 65535 {
 			return fmt.Errorf("server.port %d out of range", c.Server.Port)
 		}
+	}
+	seenPlugins := make(map[string]struct{}, len(c.Plugins))
+	for i, p := range c.Plugins {
+		if p.Name == "" {
+			return fmt.Errorf("plugin[%d]: empty label", i)
+		}
+		if p.Source == "" {
+			return fmt.Errorf("plugin %q: source is required", p.Name)
+		}
+		if p.Version == "" {
+			return fmt.Errorf("plugin %q: version is required", p.Name)
+		}
+		if _, dup := seenPlugins[p.Name]; dup {
+			return fmt.Errorf("plugin %q: duplicate label", p.Name)
+		}
+		seenPlugins[p.Name] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(c.Backends))
 	for i, b := range c.Backends {

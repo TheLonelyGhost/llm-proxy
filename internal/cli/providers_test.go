@@ -10,11 +10,11 @@ import (
 	"testing"
 )
 
-// TestProvidersListModels_DefaultConfigMissing ensures the command now falls
-// back to the platform default when no config source is specified.
+// TestProvidersListModels_DefaultConfigMissing ensures the command falls back
+// to the platform default when no config source is specified.
 func TestProvidersListModels_DefaultConfigMissing(t *testing.T) {
 	t.Setenv("LLM_PROXY_CONFIG", filepath.Join(t.TempDir(), "missing.hcl"))
-	_, err := run(t, "providers", "list-models", "ibm-bob")
+	_, err := run(t, "providers", "list-models", "myopenai")
 	if err == nil {
 		t.Fatal("expected error for missing default config")
 	}
@@ -24,8 +24,8 @@ func TestProvidersListModels_DefaultConfigMissing(t *testing.T) {
 // passes a label that does not appear in the loaded HCL config.
 func TestProvidersListModels_UnknownBackend(t *testing.T) {
 	cfg := writeConfig(t, `
-backend "bob" {
-  type    = "ibm-bob"
+backend "myopenai" {
+  type    = "openai"
   api_key = "sk-x"
 }
 `)
@@ -36,29 +36,28 @@ backend "bob" {
 }
 
 // TestProvidersListModels_PlainAndVerbose exercises the happy path against a
-// fake IBM Bob upstream and verifies both the default (id-per-line) and
-// --verbose renderings.
+// fake OpenAI-compatible upstream and verifies both the default (id-per-line)
+// and --verbose renderings.
 func TestProvidersListModels_PlainAndVerbose(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/model/info", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[
-			{"id":"alpha","owned_by":"ibm","description":"first"},
-			{"id":"beta","owned_by":"ibm"}
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+			{"id":"alpha","owned_by":"openai"},
+			{"id":"beta","owned_by":"openai"}
 		]}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	cfg := writeConfig(t, fmt.Sprintf(`
-backend "bob" {
-  type     = "ibm-bob"
-  api_key  = "sk-test"
-  api_base = "%s"
+backend "myopenai" {
+  type     = "openai"
+  base_url = "%s"
 }
 `, srv.URL))
 
-	plain, err := run(t, "providers", "list-models", "bob", "-c", cfg)
+	plain, err := run(t, "providers", "list-models", "myopenai", "-c", cfg)
 	if err != nil {
 		t.Fatalf("plain: %v\n%s", err, plain)
 	}
@@ -67,18 +66,15 @@ backend "bob" {
 		t.Errorf("plain output = %q", plain)
 	}
 
-	verbose, err := run(t, "providers", "list-models", "bob", "-c", cfg, "--verbose")
+	verbose, err := run(t, "providers", "list-models", "myopenai", "-c", cfg, "--verbose")
 	if err != nil {
 		t.Fatalf("verbose: %v\n%s", err, verbose)
 	}
-	if !strings.Contains(verbose, "alpha") || !strings.Contains(verbose, "description: first") {
-		t.Errorf("verbose missing description:\n%s", verbose)
-	}
-	if !strings.Contains(verbose, "vendor: ibm") {
-		t.Errorf("verbose missing vendor:\n%s", verbose)
+	if !strings.Contains(verbose, "alpha") {
+		t.Errorf("verbose missing model 'alpha':\n%s", verbose)
 	}
 
-	jsonOut, err := run(t, "providers", "list-models", "bob", "-c", cfg, "--json")
+	jsonOut, err := run(t, "providers", "list-models", "myopenai", "-c", cfg, "--json")
 	if err != nil {
 		t.Fatalf("json: %v\n%s", err, jsonOut)
 	}
@@ -91,31 +87,23 @@ backend "bob" {
 	}
 }
 
-// TestProvidersListModels_UnsupportedBackend confirms a clear error when the
-// resolved backend does not implement the optional ModelLister interface.
-//
-// We can't easily register a third backend type from a test, but every
-// shipped backend currently implements ModelLister. To still exercise the
-// branch, point at a backend whose upstream errors out and ensure the error
-// surfaces sensibly. (A future provider lacking the capability is covered
-// by the type assertion in the command implementation.)
+// TestProvidersListModels_UpstreamError confirms upstream errors surface clearly.
 func TestProvidersListModels_UpstreamError(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/model/info", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "denied", http.StatusForbidden)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	cfg := writeConfig(t, fmt.Sprintf(`
-backend "bob" {
-  type     = "ibm-bob"
-  api_key  = "sk-test"
-  api_base = "%s"
+backend "myopenai" {
+  type     = "openai"
+  base_url = "%s"
 }
 `, srv.URL))
-	_, err := run(t, "providers", "list-models", "bob", "-c", cfg)
-	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
-		t.Fatalf("err = %v", err)
+	_, err := run(t, "providers", "list-models", "myopenai", "-c", cfg)
+	if err == nil {
+		t.Fatalf("expected error for upstream 403, got nil")
 	}
 }

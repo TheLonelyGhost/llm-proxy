@@ -68,7 +68,11 @@ func newProvidersListModelsCmd(out io.Writer) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := buildBackend(*block, slog.Default(), cfg.Server.LogBodies, tracenoop.NewTracerProvider().Tracer("providers"))
+			pluginMap := make(map[string]config.PluginBlock, len(cfg.Plugins))
+			for _, pb := range cfg.Plugins {
+				pluginMap[pb.Name] = pb
+			}
+			b, err := buildBackend(cmd.Context(), *block, pluginMap, slog.Default(), cfg.Server.LogBodies, tracenoop.NewTracerProvider().Tracer("providers"))
 			if err != nil {
 				return fmt.Errorf("init backend %q: %w", block.Name, err)
 			}

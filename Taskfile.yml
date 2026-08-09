@@ -101,8 +101,6 @@ tasks:
     cmds:
       - go test -run=^$ -fuzz=FuzzLoadHCL -fuzztime=10s ./internal/config
       - go test -run=^$ -fuzz=FuzzParseModel -fuzztime=10s ./internal/router
-      - go test -run=^$ -fuzz=FuzzCanonicalString -fuzztime=10s ./internal/providers/ibmbob
-      - go test -run=^$ -fuzz=FuzzJWTExpiry -fuzztime=10s ./internal/providers/ibmbob
 
   check:
     desc: "Full pre-commit pipeline: fmt, vet, lint, nilaway, vuln, test:cover"

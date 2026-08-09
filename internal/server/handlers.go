@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -86,8 +87,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for _, b := range s.registry.All() {
 		models, err := b.Models(r.Context())
 		if err != nil {
-			s.logger.Warn("backend models error", "backend", b.Name(), "err", err)
-			continue
+			s.logger.Error("backend models error", "backend", b.Name(), "err", err)
+			http.Error(w, fmt.Sprintf("backend %q models: %v", b.Name(), err), http.StatusBadGateway)
+			return
 		}
 		for _, m := range models {
 			out.Data = append(out.Data, modelListItem{
@@ -106,8 +108,9 @@ func (s *Server) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 	for _, b := range s.registry.All() {
 		models, err := b.Models(r.Context())
 		if err != nil {
-			s.logger.Warn("backend models error", "backend", b.Name(), "err", err)
-			continue
+			s.logger.Error("backend models error", "backend", b.Name(), "err", err)
+			http.Error(w, fmt.Sprintf("backend %q models: %v", b.Name(), err), http.StatusBadGateway)
+			return
 		}
 		for _, m := range models {
 			item := modelInfoItem{
@@ -135,24 +138,29 @@ func (s *Server) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleBudget reports per-backend spend / quota information for backends
-// that implement backend.BudgetReporter. The response is styled like other
-// OpenAI list endpoints (object/data, snake_case) and includes a backend
-// discriminator on every item.
+// handleBudget reports per-backend spend / quota information. It tries each
+// registered backend in turn using two strategies:
+//
+//  1. backend.BudgetReporter (compiled-in providers that implement it directly)
+//  2. backend.ToolRunner + tool name "budget" (sidecar plugins that ship a
+//     budget tool; stdout must validate against assets/budget.schema.json)
+//
+// The response is styled like other OpenAI list endpoints (object/data,
+// snake_case) and includes a "backend" discriminator on every item.
 //
 // Query parameters:
 //
 //	backend=<prefix>  Restrict the response to a single backend. When
 //	                  omitted, the proxy aggregates every registered
-//	                  backend that implements BudgetReporter.
+//	                  backend that supports budget reporting.
 //
 // Status codes:
 //
 //	200  one or more backends reported a budget
 //	404  ?backend=<x> was supplied but no such backend is registered
-//	501  the named backend exists but does not implement BudgetReporter,
-//	     or no registered backend implements it
-//	502  upstream failure from a backend that does implement it
+//	501  the named backend supports neither BudgetReporter nor a budget tool,
+//	     or no registered backend supports either
+//	502  upstream failure from a backend that does support it
 func (s *Server) handleBudget(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("backend")
 
@@ -161,40 +169,32 @@ func (s *Server) handleBudget(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		reporter, ok := b.(backend.BudgetReporter)
-		if !ok {
-			writeAPIError(w, http.StatusNotImplemented, "not_implemented",
-				fmt.Sprintf("backend %q does not report budget info", name))
+		item, status, msg := s.fetchBudgetItem(r.Context(), b)
+		if status != 0 {
+			s.writeBudgetHTTPError(w, name, status, msg)
 			return
 		}
-		bud, err := reporter.Budget(r.Context())
-		if err != nil {
-			s.writeBudgetError(w, name, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, budgetToItem(name, bud))
+		writeJSON(w, http.StatusOK, item)
 		return
 	}
 
-	// Aggregate over every registered backend that implements the optional
-	// interface. Backends that don't are skipped silently; upstream errors
-	// from those that do are logged and skipped to keep the aggregate
-	// response useful (a downstream client can ask for a single backend if
-	// it needs a hard failure).
+	// Aggregate over every registered backend that supports budget reporting.
+	// Backends that support neither BudgetReporter nor a budget tool are
+	// skipped silently; upstream errors from those that do are logged and
+	// skipped so the aggregate response remains useful.
 	out := budgetList{Object: "list", Data: []budgetItem{}}
 	saw := false
 	for _, b := range s.registry.All() {
-		reporter, ok := b.(backend.BudgetReporter)
-		if !ok {
+		if !supportsBudget(b) {
 			continue
 		}
 		saw = true
-		bud, err := reporter.Budget(r.Context())
-		if err != nil {
-			s.logger.Warn("budget fetch failed", "backend", b.Name(), "err", err)
+		item, status, msg := s.fetchBudgetItem(r.Context(), b)
+		if status != 0 {
+			s.logger.Warn("budget fetch failed", "backend", b.Name(), "status", status, "msg", msg)
 			continue
 		}
-		out.Data = append(out.Data, budgetToItem(b.Name(), bud))
+		out.Data = append(out.Data, item)
 	}
 	if !saw {
 		writeAPIError(w, http.StatusNotImplemented, "not_implemented",
@@ -202,6 +202,123 @@ func (s *Server) handleBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// supportsBudget returns true when b implements BudgetReporter or ToolRunner
+// with a registered "budget" tool.
+func supportsBudget(b backend.Backend) bool {
+	if _, ok := b.(backend.BudgetReporter); ok {
+		return true
+	}
+	if tr, ok := b.(backend.ToolRunner); ok {
+		_, err := tr.RunTool(context.Background(), "budget")
+		return !errors.Is(err, backend.ErrToolNotFound)
+	}
+	return false
+}
+
+// fetchBudgetItem tries BudgetReporter then ToolRunner for a single backend.
+// On success it returns (item, 0, ""). On failure it returns (zero, httpStatus, message).
+func (s *Server) fetchBudgetItem(ctx context.Context, b backend.Backend) (budgetItem, int, string) {
+	// Strategy 1: compiled-in BudgetReporter.
+	if reporter, ok := b.(backend.BudgetReporter); ok {
+		bud, err := reporter.Budget(ctx)
+		if err != nil {
+			if errors.Is(err, backend.ErrUnsupported) {
+				return budgetItem{}, http.StatusNotImplemented, err.Error()
+			}
+			s.logger.Error("budget upstream error", "backend", b.Name(), "err", err)
+			return budgetItem{}, http.StatusBadGateway, err.Error()
+		}
+		return budgetToItem(b.Name(), bud), 0, ""
+	}
+
+	// Strategy 2: ToolRunner with the "budget" tool.
+	tr, ok := b.(backend.ToolRunner)
+	if !ok {
+		return budgetItem{}, http.StatusNotImplemented,
+			fmt.Sprintf("backend %q does not report budget info", b.Name())
+	}
+	out, err := tr.RunTool(ctx, "budget")
+	if err != nil {
+		if errors.Is(err, backend.ErrToolNotFound) {
+			return budgetItem{}, http.StatusNotImplemented,
+				fmt.Sprintf("backend %q does not report budget info", b.Name())
+		}
+		// Non-zero exit: out may still contain a JSON error payload — try to
+		// parse it before falling through to a generic 502.
+		if item, parseErr := parseBudgetToolOutput(b.Name(), out); parseErr == nil {
+			return item, 0, ""
+		}
+		s.logger.Error("budget tool error", "backend", b.Name(), "err", err)
+		return budgetItem{}, http.StatusBadGateway, err.Error()
+	}
+
+	item, parseErr := parseBudgetToolOutput(b.Name(), out)
+	if parseErr != nil {
+		s.logger.Error("budget tool output invalid", "backend", b.Name(), "err", parseErr)
+		return budgetItem{}, http.StatusBadGateway,
+			fmt.Sprintf("backend %q budget tool returned invalid output: %v", b.Name(), parseErr)
+	}
+	return item, 0, ""
+}
+
+// parseBudgetToolOutput decodes raw stdout bytes from a budget tool invocation
+// against the contract defined by assets/budget.schema.json.
+//
+// The schema's oneOf has two shapes, discriminated by the presence of "error":
+//
+//	BudgetResponse:      {"object":"usage.budget", "max_budget":…, "spend":…, "remaining":…, …}
+//	BudgetErrorResponse: {"object":"usage.budget", "error":"<message>"}
+//
+// A BudgetErrorResponse is returned as a Go error so the caller can map it to
+// an appropriate HTTP status.
+func parseBudgetToolOutput(backendName string, data []byte) (budgetItem, error) {
+	if len(data) == 0 {
+		return budgetItem{}, fmt.Errorf("empty output")
+	}
+
+	// Decode into a flexible envelope first to read the discriminator fields.
+	var env struct {
+		Object    string            `json:"object"`
+		Error     string            `json:"error"`
+		Currency  string            `json:"currency"`
+		MaxBudget float64           `json:"max_budget"`
+		Spend     float64           `json:"spend"`
+		Remaining float64           `json:"remaining"`
+		Unlimited bool              `json:"unlimited"`
+		Extras    map[string]string `json:"extras"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		return budgetItem{}, fmt.Errorf("JSON decode: %w", err)
+	}
+	if env.Object != "usage.budget" {
+		return budgetItem{}, fmt.Errorf("unexpected object %q (want \"usage.budget\")", env.Object)
+	}
+	// BudgetErrorResponse discriminator.
+	if env.Error != "" {
+		return budgetItem{}, fmt.Errorf("budget tool reported error: %s", env.Error)
+	}
+	return budgetItem{
+		Object:    "usage.budget",
+		Backend:   backendName,
+		Currency:  env.Currency,
+		MaxBudget: env.MaxBudget,
+		Spend:     env.Spend,
+		Remaining: env.Remaining,
+		Unlimited: env.Unlimited,
+		Extras:    env.Extras,
+	}, nil
+}
+
+func (s *Server) writeBudgetHTTPError(w http.ResponseWriter, name string, status int, msg string) {
+	switch status {
+	case http.StatusNotImplemented:
+		writeAPIError(w, http.StatusNotImplemented, "not_implemented", msg)
+	default:
+		s.logger.Error("budget upstream error", "backend", name, "msg", msg)
+		writeAPIError(w, http.StatusBadGateway, "upstream_error", msg)
+	}
 }
 
 func budgetToItem(name string, bud backend.Budget) budgetItem {
@@ -214,16 +331,6 @@ func budgetToItem(name string, bud backend.Budget) budgetItem {
 		Remaining: bud.Remaining,
 		Unlimited: bud.Unlimited,
 		Extras:    bud.Extras,
-	}
-}
-
-func (s *Server) writeBudgetError(w http.ResponseWriter, name string, err error) {
-	switch {
-	case errors.Is(err, backend.ErrUnsupported):
-		writeAPIError(w, http.StatusNotImplemented, "not_implemented", err.Error())
-	default:
-		s.logger.Error("budget upstream error", "backend", name, "err", err)
-		writeAPIError(w, http.StatusBadGateway, "upstream_error", err.Error())
 	}
 }
 

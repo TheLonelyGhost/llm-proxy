@@ -90,6 +90,29 @@ func CacheDir() (string, error) {
 		}
 		return dir, nil
 	}
+	return cacheDirForGOOS(runtime.GOOS)
+}
+
+func cacheDirForGOOS(goos string) (string, error) {
+	if goos == "darwin" {
+		// Prefer XDG_CACHE_HOME when set, then $HOME/.cache, so that users
+		// who expect XDG conventions on macOS get ~/.cache/llm-proxy/plugins
+		// rather than ~/Library/Caches/llm-proxy/plugins.
+		if xdg, ok := os.LookupEnv("XDG_CACHE_HOME"); ok && filepath.IsAbs(xdg) {
+			dir := filepath.Join(xdg, AppName)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return "", fmt.Errorf("create cache dir %q: %w", dir, err)
+			}
+			return dir, nil
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			dir := filepath.Join(home, ".cache", AppName)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return "", fmt.Errorf("create cache dir %q: %w", dir, err)
+			}
+			return dir, nil
+		}
+	}
 	base, err := os.UserCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user cache dir: %w", err)

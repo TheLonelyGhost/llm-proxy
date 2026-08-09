@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/thelonelyghost/llm-proxy-provider-ibmbob/budget.schema.json",
+  "title": "Budget tool response",
+  "description": "JSON output of `llm-proxy plugin run ibmbob budget`. Always emitted to stdout regardless of success or failure. Discriminated by the presence of the \"error\" field.",
+  "oneOf": [
+    {
+      "title": "BudgetResponse",
+      "description": "Successful budget fetch. The configured team's current spend and limit.",
+      "type": "object",
+      "required": ["object", "max_budget", "spend", "remaining"],
+      "additionalProperties": false,
+      "properties": {
+        "object": {
+          "description": "Discriminator. Always \"usage.budget\".",
+          "type": "string",
+          "const": "usage.budget"
+        },
+        "currency": {
+          "description": "Unit in which max_budget, spend, and remaining are expressed. Omitted when the upstream does not report one.",
+          "type": "string",
+          "examples": ["bobcoins"]
+        },
+        "max_budget": {
+          "description": "Configured spending ceiling in currency units. 0 when the account is unlimited or the ceiling is unknown — inspect \"unlimited\" to distinguish the two cases.",
+          "type": "number",
+          "minimum": 0
+        },
+        "spend": {
+          "description": "Cumulative amount consumed so far in currency units.",
+          "type": "number",
+          "minimum": 0
+        },
+        "remaining": {
+          "description": "Convenience field: max_budget minus spend. 0 when max_budget is 0 (unlimited or unknown).",
+          "type": "number",
+          "minimum": 0
+        },
+        "unlimited": {
+          "description": "True when the upstream explicitly marks this account as having no spending ceiling. When true, max_budget and remaining are both 0. Omitted when false.",
+          "type": "boolean",
+          "const": true
+        },
+        "extras": {
+          "description": "Provider-specific supplemental fields. Omitted when empty.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "examples": [
+            {
+              "user_id": "user-42",
+              "instance_id": "inst-1",
+              "instance_name": "prod",
+              "team_id": "team-1",
+              "team_name": "Platform"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "title": "BudgetErrorResponse",
+      "description": "Failed budget fetch. Emitted to stdout so the output is always parseable JSON even on error.",
+      "type": "object",
+      "required": ["object", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "object": {
+          "description": "Discriminator. Always \"usage.budget\".",
+          "type": "string",
+          "const": "usage.budget"
+        },
+        "error": {
+          "description": "Human-readable error message describing why the budget could not be fetched.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  ]
+}

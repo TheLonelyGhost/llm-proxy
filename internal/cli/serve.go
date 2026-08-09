@@ -5,16 +5,20 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
+	"github.com/thelonelyghost/llm-proxy/internal/backend/sidecar"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
 	"github.com/thelonelyghost/llm-proxy/internal/paths"
-	"github.com/thelonelyghost/llm-proxy/internal/providers/copilot"
-	"github.com/thelonelyghost/llm-proxy/internal/providers/ibmbob"
+	"github.com/thelonelyghost/llm-proxy/internal/plugin"
+	"github.com/thelonelyghost/llm-proxy/internal/pluginrunner"
 	"github.com/thelonelyghost/llm-proxy/internal/providers/openai"
 	"github.com/thelonelyghost/llm-proxy/internal/server"
 	"github.com/thelonelyghost/llm-proxy/internal/telemetry"
@@ -70,8 +74,11 @@ func newServeCmd(out io.Writer) *cobra.Command {
 				cfg.Server.Port = port
 			}
 
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
 			reg := backend.NewRegistry()
-			if err := registerBackends(cfg, reg, logger, telemetry.Tracer("providers")); err != nil {
+			if err := registerBackends(ctx, cfg, reg, logger, telemetry.Tracer("providers")); err != nil {
 				return err
 			}
 			if len(reg.Names()) == 0 {
@@ -92,9 +99,6 @@ func newServeCmd(out io.Writer) *cobra.Command {
 				logger.Warn("request/response body logging is enabled; treat the log stream as a secret",
 					"setting", "server.log_bodies")
 			}
-
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
 
 			// SIGHUP: reload on-disk SSO credentials for any backend that
 			// implements the Reloadable extension, without restarting the
@@ -141,10 +145,21 @@ func newServeCmd(out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func registerBackends(cfg *config.Config, reg *backend.Registry, logger *slog.Logger, tracer trace.Tracer) error {
+func registerBackends(ctx context.Context, cfg *config.Config, reg *backend.Registry, logger *slog.Logger, tracer trace.Tracer) error {
+	// Validate that no plugin block label collides with a compiled-in type name.
+	for _, pb := range cfg.Plugins {
+		if _, reserved := compiledInTypes[pb.Name]; reserved {
+			return fmt.Errorf("plugin %q: label is reserved by a compiled-in provider type", pb.Name)
+		}
+	}
+	// Build a lookup map from plugin label to PluginBlock.
+	pluginMap := make(map[string]config.PluginBlock, len(cfg.Plugins))
+	for _, pb := range cfg.Plugins {
+		pluginMap[pb.Name] = pb
+	}
 	logBodies := cfg.Server.LogBodies
 	for _, b := range cfg.Backends {
-		p, err := buildBackend(b, logger, logBodies, tracer)
+		p, err := buildBackend(ctx, b, pluginMap, logger, logBodies, tracer)
 		if err != nil {
 			return fmt.Errorf("init backend %q: %w", b.Name, err)
 		}
@@ -158,17 +173,96 @@ func registerBackends(cfg *config.Config, reg *backend.Registry, logger *slog.Lo
 // buildBackend instantiates the concrete provider for a BackendBlock. It is
 // the single source of truth for the type->constructor mapping so the
 // `serve` and `providers list-models` commands stay in sync.
-func buildBackend(b config.BackendBlock, logger *slog.Logger, logBodies bool, tracer trace.Tracer) (backend.Backend, error) {
+//
+// pluginMap maps plugin labels to their PluginBlock configs. When a backend's
+// type matches a plugin label, a sidecar backend is returned if the plugin
+// binary is installed; otherwise an error is returned directing the operator
+// to run `llm-proxy plugin install`.
+func buildBackend(ctx context.Context, b config.BackendBlock, pluginMap map[string]config.PluginBlock, logger *slog.Logger, logBodies bool, tracer trace.Tracer) (backend.Backend, error) {
 	switch b.Type {
-	case copilot.Type:
-		return copilot.New(b, copilot.Options{Name: b.Name, Models: b.Models, Logger: logger, LogBodies: logBodies, Tracer: tracer})
-	case ibmbob.Type:
-		return ibmbob.New(b, ibmbob.Options{Name: b.Name, Models: b.Models, Logger: logger, LogBodies: logBodies, Tracer: tracer})
 	case openai.Type:
 		return openai.New(b, openai.Options{Name: b.Name, Models: b.Models, Logger: logger, LogBodies: logBodies, Tracer: tracer})
 	default:
+		// Check if the type matches a declared plugin label.
+		if pb, ok := pluginMap[b.Type]; ok {
+			return buildSidecarBackend(ctx, b, pb, logger)
+		}
 		return nil, fmt.Errorf("backend %q: unknown type %q", b.Name, b.Type)
 	}
+}
+
+// buildSidecarBackend checks that the plugin binary is installed, picks a free
+// port, starts the plugin process via pluginrunner, waits for it to become
+// healthy, then returns a sidecar.Backend pointed at its real address.
+func buildSidecarBackend(ctx context.Context, b config.BackendBlock, pb config.PluginBlock, logger *slog.Logger) (backend.Backend, error) {
+	cacheBase, err := paths.CacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("plugin %q: resolve cache dir: %w", pb.Name, err)
+	}
+	namespace, name := sourceNamespace(pb.Source, pb.Name)
+	destDir, err := plugin.PluginCacheDir(cacheBase, namespace, name, pb.Version)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %q: cache dir: %w", pb.Name, err)
+	}
+	binPath := filepath.Join(destDir, plugin.BinaryName(pb.Name))
+	if _, err := os.Stat(binPath); err != nil {
+		return nil, fmt.Errorf(
+			"plugin %q: binary not found at %q — run `llm-proxy plugin install` first",
+			pb.Name, binPath,
+		)
+	}
+
+	// Read the manifest so we can honour the plugin's declared port env var
+	// and endpoint paths.
+	manifestPath := filepath.Join(destDir, plugin.ManifestName(pb.Name))
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %q: read manifest %q: %w", pb.Name, manifestPath, err)
+	}
+	mani, err := plugin.ParseManifest(manifestData)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %q: parse manifest: %w", pb.Name, err)
+	}
+
+	// Pick a free loopback port for the sidecar.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("plugin %q: allocate port: %w", pb.Name, err)
+	}
+	assignedPort := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	runner := pluginrunner.New(pluginrunner.Config{
+		Name:                  pb.Name,
+		BinaryPath:            binPath,
+		PortEnvVar:            mani.PortEnvVar,
+		AssignedPort:          assignedPort,
+		HealthPath:            mani.Endpoints.Health,
+		HealthInterval:        200 * time.Millisecond,
+		HealthTimeout:         5 * time.Second,
+		HealthThreshold:       1,
+		ReloadPath:            mani.Endpoints.Reload,
+		RestartPolicy:         pluginrunner.RestartOnFailure,
+		RestartMaxRetries:     5,
+		RestartInitialBackoff: time.Second,
+		RestartBackoffCap:     30 * time.Second,
+		ShutdownTimeout:       30 * time.Second,
+	})
+
+	startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := runner.Start(startCtx); err != nil {
+		return nil, fmt.Errorf("plugin %q: %w", pb.Name, err)
+	}
+
+	logger.Info("plugin started", "plugin", pb.Name, "backend", b.Name, "addr", runner.BaseURL())
+
+	return sidecar.New(sidecar.Options{
+		Name:       b.Name,
+		BaseURL:    runner.BaseURL(),
+		BinaryPath: binPath,
+		Tools:      mani.Tools,
+	})
 }
 
 func newLogger(w io.Writer, level string) *slog.Logger {

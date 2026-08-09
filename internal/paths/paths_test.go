@@ -36,6 +36,38 @@ func TestConfigAndCacheDir(t *testing.T) {
 	}
 }
 
+func TestCacheDir_DarwinPrefersXDG(t *testing.T) {
+	tmp := t.TempDir()
+	xdg := filepath.Join(tmp, "xdg-cache")
+	t.Setenv("XDG_CACHE_HOME", xdg)
+	t.Setenv("HOME", tmp)
+	got, err := cacheDirForGOOS("darwin")
+	if err != nil {
+		t.Fatalf("cacheDirForGOOS: %v", err)
+	}
+	want := filepath.Join(xdg, AppName)
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if st, err := os.Stat(got); err != nil || !st.IsDir() {
+		t.Fatalf("cache dir not created: %v", err)
+	}
+}
+
+func TestCacheDir_DarwinFallsBackToXDGDefault(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CACHE_HOME", "") // empty -> fall through to $HOME/.cache
+	got, err := cacheDirForGOOS("darwin")
+	if err != nil {
+		t.Fatalf("cacheDirForGOOS: %v", err)
+	}
+	want := filepath.Join(tmp, ".cache", AppName)
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestConfigDir_DarwinPrefersLegacyPath(t *testing.T) {
 	tmp := t.TempDir()
 	legacy := filepath.Join(tmp, ".config", AppName)

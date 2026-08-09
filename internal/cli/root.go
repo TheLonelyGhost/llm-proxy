@@ -3,7 +3,7 @@
 // Subcommands:
 //
 //	serve   - start the HTTP proxy
-//	login   - run the GitHub device-code flow once to persist credentials
+//	plugin  - manage sidecar plugins (install, run)
 //	version - print build version
 package cli
 
@@ -17,8 +17,9 @@ import (
 // Version is overridden via -ldflags at release time.
 var Version = "dev"
 
-// New returns the root command.
-func New(out io.Writer) *cobra.Command {
+// New returns the root command. out receives normal (stdout) output;
+// errOut receives diagnostic (stderr) output such as cobra error messages.
+func New(out, errOut io.Writer) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "llm-proxy",
 		Short: "OpenAI-compatible proxy that fronts pluggable LLM backends",
@@ -28,12 +29,10 @@ func New(out io.Writer) *cobra.Command {
 		SilenceUsage: true,
 	}
 	root.SetOut(out)
-	root.SetErr(out)
+	root.SetErr(errOut)
 	root.AddCommand(newServeCmd(out))
-	root.AddCommand(newLoginCmd(out))
-	root.AddCommand(newLogoutCmd(out))
-	root.AddCommand(newIBMBobCmd(out))
 	root.AddCommand(newProvidersCmd(out))
+	root.AddCommand(newPluginCmd(out, errOut))
 	root.AddCommand(newVersionCmd(out))
 	return root
 }
