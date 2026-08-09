@@ -5,6 +5,9 @@
 //	serve   - start the HTTP proxy
 //	plugin  - manage sidecar plugins (install, run)
 //	version - print build version
+//
+// The `providers` subcommand group was removed in favour of the plugin-level
+// `list-models` tool convention (see docs/plugins/authoring.md).
 package cli
 
 import (
@@ -31,7 +34,6 @@ func New(out, errOut io.Writer) *cobra.Command {
 	root.SetOut(out)
 	root.SetErr(errOut)
 	root.AddCommand(newServeCmd(out))
-	root.AddCommand(newProvidersCmd(out))
 	root.AddCommand(newPluginCmd(out, errOut))
 	root.AddCommand(newVersionCmd(out))
 	return root

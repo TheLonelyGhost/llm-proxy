@@ -50,6 +50,30 @@ your-binary --tool <subcommand> [args...]
 stdin/stdout/stderr are passed through directly. Implement `--tool` as a
 top-level flag or subcommand that dispatches to the named function and exits.
 
+### Backend context environment variables
+
+Before exec-ing your binary, llm-proxy sets three environment variables so your
+tool knows which backend instance it is running for:
+
+| Variable | Value |
+|---|---|
+| `LLM_PROXY_BACKEND_LABEL` | The `backend` block label (e.g. `ollama`) |
+| `LLM_PROXY_BACKEND_TYPE` | The plugin type name (e.g. `copilot`) |
+| `LLM_PROXY_BACKEND_CONFIG` | JSON object with all backend attributes |
+
+`LLM_PROXY_BACKEND_CONFIG` is a JSON object whose keys are `name`, `type`, and
+every provider-specific attribute declared in the `backend` block with `env()`
+references already evaluated. A typical value looks like:
+
+```json
+{"name":"ollama","type":"openrouter","base_url":"http://localhost:11434"}
+```
+
+Use these variables to select the correct credential file, endpoint URL, or any
+other instance-specific configuration. When two backends reference the same
+plugin type (e.g. `ollama` and `cloud` both use `type = "openrouter"`),
+`LLM_PROXY_BACKEND_LABEL` tells your tool which one to operate on.
+
 ### The `login` convention
 
 llm-proxy has no built-in `login` command. Authentication is entirely the
@@ -58,10 +82,10 @@ plugin's concern.
 **If your plugin requires interactive credential setup** (OAuth flows, device
 codes, browser redirects, API-key prompts, etc.) you **must** expose a tool
 named `login` in your manifest. Operators run it once before starting the
-proxy:
+proxy, specifying the `backend` block label they want to authenticate:
 
 ```sh
-llm-proxy plugin run <label> login
+llm-proxy plugin run <backend-label> login
 ```
 
 Behaviour requirements:
@@ -79,13 +103,45 @@ Behaviour requirements:
 Plugins backed by static, long-lived credentials (e.g. an API key in the
 config file or an environment variable) do not need a `login` tool at all.
 
+### The `list-models` convention
+
+Plugins that can enumerate available models from their upstream provider
+**should** expose a tool named `list-models`.
+
+```sh
+llm-proxy plugin run <backend-label> list-models
+```
+
+This tool is distinct from the `/v1/models` HTTP endpoint served while the
+proxy is running. It is a standalone CLI path intended for operators who want
+to discover available models without starting the proxy — for example, to
+learn which model IDs to place in an allow-list or to verify that credentials
+are working.
+
+Behaviour requirements:
+
+- Query the upstream provider's model catalogue using whatever credentials the
+  plugin has stored (written by `login`, or read from the config file / env).
+- Print each model on stdout. Plain text (one model ID per line) is
+  sufficient; structured output (e.g. JSON) is permitted if the plugin
+  provides a flag for it.
+- The output **must not** be filtered or constrained by the operator's
+  configured `models` allow-list. This tool is for discovery; the allow-list
+  is an operator-level concern applied by the proxy at serve time, not here.
+- Exit **0** on success, non-zero on failure.
+- On failure, print a clear, human-readable message to stderr.
+- Document the tool in your plugin's README under a **"Models"** or
+  **"Available models"** heading.
+
+Plugins backed by a static, well-known model list do not need this tool.
+
 ### The `logout` convention
 
 If your plugin persists credentials on disk, consider also exposing a tool
 named `logout`. It is the counterpart to `login`:
 
 ```sh
-llm-proxy plugin run <label> logout
+llm-proxy plugin run <backend-label> logout
 ```
 
 Behaviour requirements:
@@ -115,10 +171,11 @@ release archive:
     "reload": "/management/reload"
   },
   "tools": [
-    { "name": "login",   "description": "Authenticate via browser SSO" },
-    { "name": "logout",  "description": "Remove persisted credentials" },
-    { "name": "budget",  "description": "Show current spend and budget limit for myprovider" },
-    { "name": "extract", "description": "Extract secret from installed CLI" }
+    { "name": "login",       "description": "Authenticate via browser SSO" },
+    { "name": "logout",      "description": "Remove persisted credentials" },
+    { "name": "list-models", "description": "List upstream models available to the configured credential" },
+    { "name": "budget",      "description": "Show current spend and budget limit for myprovider" },
+    { "name": "extract",     "description": "Extract secret from installed CLI" }
   ]
 }
 ```

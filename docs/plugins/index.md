@@ -150,14 +150,33 @@ Plugins may expose CLI tooling subcommands (e.g. `login`, `extract`).
 Run them via:
 
 ```sh
-llm-proxy plugin run <label> <subcommand> [args...]
+llm-proxy plugin run <backend-label> <subcommand> [args...]
+```
+
+where `<backend-label>` is the label of a `backend` block in your configuration
+(not the plugin type name). This lets you target the correct instance when two
+backends use the same plugin type:
+
+```hcl
+plugin "openrouter" {
+  source  = "github.com/example/llm-proxy-provider-openrouter"
+  version = "~> 1.0"
+}
+
+backend "ollama" { type = "openrouter" }
+backend "cloud"  { type = "openrouter" }
+```
+
+```sh
+llm-proxy plugin run ollama login   # targets the "ollama" backend
+llm-proxy plugin run cloud  login   # targets the "cloud" backend
 ```
 
 stdin/stdout/stderr are passed through directly. The command exits with the
 plugin's exit code.
 
 Available subcommands for an installed plugin are listed in its manifest file
-and surfaced in `llm-proxy plugin run <label> --help`.
+and surfaced in `llm-proxy plugin run <backend-label> --help`.
 
 ### Authentication
 
@@ -166,17 +185,17 @@ entirely the plugin's responsibility.
 
 Plugins that require interactive credential setup (OAuth flows, browser
 redirects, device codes, etc.) expose a `login` tool. Run it once before
-starting the proxy:
+starting the proxy, passing the backend label you want to authenticate:
 
 ```sh
-llm-proxy plugin run <label> login
+llm-proxy plugin run <backend-label> login
 ```
 
 Plugins that persist credentials on disk may also expose a `logout` tool to
 remove them:
 
 ```sh
-llm-proxy plugin run <label> logout
+llm-proxy plugin run <backend-label> logout
 ```
 
 `logout` is idempotent — it exits 0 even when no credentials are found.

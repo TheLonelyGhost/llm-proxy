@@ -11,7 +11,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 
-- **BREAKING:** `llm-proxy login` and `llm-proxy logout` top-level commands removed. Authentication is entirely a plugin concern. Plugins that require interactive credential setup must expose a `login` tool; invoke it with `llm-proxy plugin run <label> login`. Same with `logout` tool, invoked with `llm-proxy plugin run <label> logout`.
+- **BREAKING:** `llm-proxy providers` subcommand group removed, including `llm-proxy providers list-models`. Upstream model discovery is now a plugin concern. Plugins that support it expose a `list-models` tool; replace any `llm-proxy providers list-models <backend>` calls with `llm-proxy plugin run <backend-label> list-models`. The tool is not filtered by the operator allow-list, preserving the same discovery behaviour. See `docs/plugins/authoring.md` for the plugin-author contract.
+- **BREAKING:** `llm-proxy login` and `llm-proxy logout` top-level commands removed. Authentication is entirely a plugin concern. Plugins that require interactive credential setup must expose a `login` tool; invoke it with `llm-proxy plugin run <backend-label> login`. Same with `logout` tool, invoked with `llm-proxy plugin run <backend-label> logout`.
 - **BREAKING:** `github-copilot` backend removed from core; it is now the external plugin [`github.com/thelonelyghost/llm-proxy-provider-copilot`](https://github.com/thelonelyghost/llm-proxy-provider-copilot). Add a `plugin` block pointing to that module and update your `backend` blocks accordingly.
 - **BREAKING:** `ibm-bob` backend removed from core; it is now the external plugin [`github.com/thelonelyghost/llm-proxy-provider-ibmbob`](https://github.com/thelonelyghost/llm-proxy-provider-ibmbob). Add a `plugin` block pointing to that module and update your `backend` blocks accordingly.
 
@@ -28,11 +29,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `serve` now uses the lock-file-resolved concrete version (e.g. `1.2.3`) when locating the plugin binary in the cache, instead of the raw version constraint string (e.g. `~> 1.0`). Previously, a plugin declared with a range constraint would never be found after install and `serve` would always report the binary as missing.
 - `tool_calls` arrays were dropped from chat completion responses.
 - `finish_reason="tool_calls"` without a `tool_calls` array is now normalised to `"stop"`.
 - `/v1/responses` is no longer marked experimental.
-
----
 
 ## [0.1.0] — 2026-05-22
 

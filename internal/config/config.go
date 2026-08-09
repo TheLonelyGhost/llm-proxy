@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -268,6 +269,64 @@ func DecodeBackend(b BackendBlock, target any) error {
 		return fmt.Errorf("decode backend %q: %s", b.Name, diags.Error())
 	}
 	return nil
+}
+
+// BackendConfigJSON returns a JSON object containing the well-known backend
+// fields ("name", "type", "models") together with every provider-specific
+// attribute found in BackendBlock.Remain evaluated against the standard
+// EvalContext. Values that are plain strings are included as JSON strings;
+// all other cty types are serialised via their JSON representation.
+//
+// The result is intended to be forwarded to plugin processes as the value of
+// the LLM_PROXY_BACKEND_CONFIG environment variable so they can read
+// instance-specific configuration (e.g. base_url, api_key) without needing a
+// separate config-file path argument.
+func BackendConfigJSON(b BackendBlock) (string, error) {
+	attrs, diags := b.Remain.JustAttributes()
+	if diags.HasErrors() {
+		return "", fmt.Errorf("backend %q: read attributes: %s", b.Name, diags.Error())
+	}
+
+	ectx := EvalContext()
+	out := make(map[string]any, len(attrs)+3)
+	out["name"] = b.Name
+	out["type"] = b.Type
+	if len(b.Models) > 0 {
+		out["models"] = b.Models
+	}
+	for k, attr := range attrs {
+		val, evalDiags := attr.Expr.Value(ectx)
+		if evalDiags.HasErrors() {
+			// Skip attributes that cannot be evaluated (e.g. unknown references);
+			// the plugin can request them through its own means.
+			continue
+		}
+		switch val.Type() {
+		case cty.String:
+			out[k] = val.AsString()
+		case cty.Number:
+			bf := val.AsBigFloat()
+			if bf.IsInt() {
+				i64, _ := bf.Int64()
+				out[k] = i64
+			} else {
+				f64, _ := bf.Float64()
+				out[k] = f64
+			}
+		case cty.Bool:
+			out[k] = val.True()
+		default:
+			// For complex types (lists, maps, objects) fall back to the string
+			// representation so plugins can parse it themselves if needed.
+			out[k] = val.GoString()
+		}
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("backend %q: marshal config: %w", b.Name, err)
+	}
+	return string(raw), nil
 }
 
 func discover(path string) ([]string, error) {

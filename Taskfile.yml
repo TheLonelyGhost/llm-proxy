@@ -4,6 +4,7 @@ version: "3"
 vars:
   BINARY: llm-proxy
   PKG: github.com/thelonelyghost/llm-proxy
+  VERSION: "1.0.0"
   COVER_THRESHOLD: 80
 
 env:
@@ -32,7 +33,7 @@ tasks:
     desc: "Build the binary for the current platform"
     cmds:
       - mkdir -p bin
-      - go build -trimpath -ldflags="-s -w" -o bin/{{.BINARY}} ./cmd/{{.BINARY}}
+      - go build -trimpath -ldflags="-s -w -X '{{.PKG}}/internal/cli.Version={{.VERSION}}'" -o bin/{{.BINARY}} ./cmd/{{.BINARY}}
 
   install:
     desc: "Install the binary to PATH"
@@ -52,7 +53,7 @@ tasks:
           IFS=/ read -r OS ARCH <<< "{{.ITEM}}"
           EXT=""
           if [ "$OS" = "windows" ]; then EXT=".exe"; fi
-          GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags="-s -w" \
+          GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags="-s -w -X '{{.PKG}}/internal/cli.Version={{.VERSION}}'" \
             -o dist/{{.BINARY}}-${OS}-${ARCH}${EXT} ./cmd/{{.BINARY}}
     vars:
       PLATFORMS: "linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"

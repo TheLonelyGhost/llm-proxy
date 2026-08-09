@@ -16,6 +16,7 @@ import (
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/backend/sidecar"
 	"github.com/thelonelyghost/llm-proxy/internal/config"
+	"github.com/thelonelyghost/llm-proxy/internal/lockfile"
 	"github.com/thelonelyghost/llm-proxy/internal/paths"
 	"github.com/thelonelyghost/llm-proxy/internal/plugin"
 	"github.com/thelonelyghost/llm-proxy/internal/pluginrunner"
@@ -157,9 +158,25 @@ func registerBackends(ctx context.Context, cfg *config.Config, reg *backend.Regi
 	for _, pb := range cfg.Plugins {
 		pluginMap[pb.Name] = pb
 	}
+
+	// Read the lock file once so buildSidecarBackend can use the resolved
+	// concrete version instead of the raw constraint string.
+	var lf *lockfile.Lockfile
+	if len(cfg.Plugins) > 0 {
+		lockPath, lockErr := lockfile.PathFor(cfg.SourcePath)
+		if lockErr == nil {
+			if read, readErr := readOrNewLockfile(lockPath); readErr == nil {
+				lf = read
+			}
+		}
+	}
+	if lf == nil {
+		lf = &lockfile.Lockfile{}
+	}
+
 	logBodies := cfg.Server.LogBodies
 	for _, b := range cfg.Backends {
-		p, err := buildBackend(ctx, b, pluginMap, logger, logBodies, tracer)
+		p, err := buildBackend(ctx, b, pluginMap, lf, logger, logBodies, tracer)
 		if err != nil {
 			return fmt.Errorf("init backend %q: %w", b.Name, err)
 		}
@@ -171,21 +188,21 @@ func registerBackends(ctx context.Context, cfg *config.Config, reg *backend.Regi
 }
 
 // buildBackend instantiates the concrete provider for a BackendBlock. It is
-// the single source of truth for the type->constructor mapping so the
-// `serve` and `providers list-models` commands stay in sync.
+// the single source of truth for the type->constructor mapping used by the
+// `serve` command.
 //
 // pluginMap maps plugin labels to their PluginBlock configs. When a backend's
 // type matches a plugin label, a sidecar backend is returned if the plugin
 // binary is installed; otherwise an error is returned directing the operator
 // to run `llm-proxy plugin install`.
-func buildBackend(ctx context.Context, b config.BackendBlock, pluginMap map[string]config.PluginBlock, logger *slog.Logger, logBodies bool, tracer trace.Tracer) (backend.Backend, error) {
+func buildBackend(ctx context.Context, b config.BackendBlock, pluginMap map[string]config.PluginBlock, lf *lockfile.Lockfile, logger *slog.Logger, logBodies bool, tracer trace.Tracer) (backend.Backend, error) {
 	switch b.Type {
 	case openai.Type:
 		return openai.New(b, openai.Options{Name: b.Name, Models: b.Models, Logger: logger, LogBodies: logBodies, Tracer: tracer})
 	default:
 		// Check if the type matches a declared plugin label.
 		if pb, ok := pluginMap[b.Type]; ok {
-			return buildSidecarBackend(ctx, b, pb, logger)
+			return buildSidecarBackend(ctx, b, pb, lf, logger)
 		}
 		return nil, fmt.Errorf("backend %q: unknown type %q", b.Name, b.Type)
 	}
@@ -194,13 +211,22 @@ func buildBackend(ctx context.Context, b config.BackendBlock, pluginMap map[stri
 // buildSidecarBackend checks that the plugin binary is installed, picks a free
 // port, starts the plugin process via pluginrunner, waits for it to become
 // healthy, then returns a sidecar.Backend pointed at its real address.
-func buildSidecarBackend(ctx context.Context, b config.BackendBlock, pb config.PluginBlock, logger *slog.Logger) (backend.Backend, error) {
+func buildSidecarBackend(ctx context.Context, b config.BackendBlock, pb config.PluginBlock, lf *lockfile.Lockfile, logger *slog.Logger) (backend.Backend, error) {
 	cacheBase, err := paths.CacheDir()
 	if err != nil {
 		return nil, fmt.Errorf("plugin %q: resolve cache dir: %w", pb.Name, err)
 	}
+
+	// Resolve the concrete version: prefer the lock file so we use the same
+	// version that `plugin install` actually downloaded, rather than the raw
+	// constraint string (e.g. "~> 1.0") which is never a valid directory name.
+	concreteVersion := pb.Version
+	if entry, ok := lf.Lookup(pb.Name); ok {
+		concreteVersion = entry.Resolved
+	}
+
 	namespace, name := sourceNamespace(pb.Source, pb.Name)
-	destDir, err := plugin.PluginCacheDir(cacheBase, namespace, name, pb.Version)
+	destDir, err := plugin.PluginCacheDir(cacheBase, namespace, name, concreteVersion)
 	if err != nil {
 		return nil, fmt.Errorf("plugin %q: cache dir: %w", pb.Name, err)
 	}

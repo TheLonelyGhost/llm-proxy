@@ -453,18 +453,22 @@ func sourceNamespace(source, pluginName string) (namespace, name string) {
 	return pluginName, pluginName
 }
 
-// newPluginRunCmd implements `llm-proxy plugin run <label> <subcommand> [args...]`.
+// newPluginRunCmd implements `llm-proxy plugin run <backend-label> <subcommand> [args...]`.
 func newPluginRunCmd(out, errOut io.Writer) *cobra.Command {
 	var cfgPath string
 	cmd := &cobra.Command{
-		Use:   "run <plugin-label> <subcommand> [args...]",
+		Use:   "run <backend-label> <subcommand> [args...]",
 		Short: "Run a tooling subcommand provided by an installed plugin",
-		Long: "Invokes the installed plugin binary in tooling mode, passing the " +
-			"subcommand name via --tool and forwarding stdin/stdout/stderr. " +
+		Long: "Resolves <backend-label> to a configured backend, finds the plugin that " +
+			"backs it, and invokes the installed plugin binary in tooling mode, passing " +
+			"the subcommand name via --tool and forwarding stdin/stdout/stderr. " +
+			"The backend configuration is forwarded to the plugin via environment " +
+			"variables (LLM_PROXY_BACKEND_LABEL, LLM_PROXY_BACKEND_TYPE, " +
+			"LLM_PROXY_BACKEND_CONFIG). " +
 			"Exits with the plugin's exit code.",
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			label := args[0]
+			backendLabel := args[0]
 			subcommand := args[1]
 			rest := args[2:]
 
@@ -473,15 +477,33 @@ func newPluginRunCmd(out, errOut io.Writer) *cobra.Command {
 				return err
 			}
 
+			// Resolve the backend by label.
+			var bb *config.BackendBlock
+			for i := range cfg.Backends {
+				if cfg.Backends[i].Name == backendLabel {
+					bb = &cfg.Backends[i]
+					break
+				}
+			}
+			if bb == nil {
+				return fmt.Errorf("no backend %q declared in configuration", backendLabel)
+			}
+
+			// The backend's type must be a plugin (not a compiled-in provider).
+			if _, isCompiled := compiledInTypes[bb.Type]; isCompiled {
+				return fmt.Errorf("backend %q uses compiled-in provider type %q which does not support plugin tooling", backendLabel, bb.Type)
+			}
+
+			// Find the plugin block whose label matches bb.Type.
 			var pb *config.PluginBlock
 			for i := range cfg.Plugins {
-				if cfg.Plugins[i].Name == label {
+				if cfg.Plugins[i].Name == bb.Type {
 					pb = &cfg.Plugins[i]
 					break
 				}
 			}
 			if pb == nil {
-				return fmt.Errorf("no plugin %q declared in configuration", label)
+				return fmt.Errorf("no plugin %q declared in configuration (required by backend %q)", bb.Type, backendLabel)
 			}
 
 			cacheBase, err := paths.CacheDir()
@@ -503,8 +525,14 @@ func newPluginRunCmd(out, errOut io.Writer) *cobra.Command {
 			destDir := plugin.PluginCacheDirNoCreate(cacheBase, namespace, name, concreteVersion)
 			binPath := filepath.Join(destDir, plugin.BinaryName(pb.Name))
 
+			// Build backend-context environment variables for the plugin.
+			extraEnv, err := buildBackendEnv(*bb)
+			if err != nil {
+				return fmt.Errorf("build backend env for %q: %w", backendLabel, err)
+			}
+
 			toolArgs := append([]string{"--tool", subcommand}, rest...)
-			err = execPlugin(cmd.Context(), out, errOut, binPath, toolArgs)
+			err = execPlugin(cmd.Context(), out, errOut, binPath, toolArgs, extraEnv)
 			if err != nil {
 				// Suppress cobra's own error message for ExitCodeError: the
 				// plugin process already wrote its own diagnostics to stderr.
@@ -530,8 +558,26 @@ func newPluginRunCmd(out, errOut io.Writer) *cobra.Command {
 	return cmd
 }
 
-// execPlugin execs the plugin binary with args, connecting stdin/stdout/stderr.
-func execPlugin(ctx context.Context, _ io.Writer, _ io.Writer, binPath string, args []string) error {
+// buildBackendEnv constructs the extra environment variables that are
+// forwarded to the plugin process when `plugin run` is used. It sets:
+//
+//	LLM_PROXY_BACKEND_LABEL  – the backend block label (e.g. "ollama")
+//	LLM_PROXY_BACKEND_TYPE   – the plugin type (e.g. "copilot")
+//	LLM_PROXY_BACKEND_CONFIG – JSON object with all backend attributes
+func buildBackendEnv(bb config.BackendBlock) ([]string, error) {
+	configJSON, err := config.BackendConfigJSON(bb)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"LLM_PROXY_BACKEND_LABEL=" + bb.Name,
+		"LLM_PROXY_BACKEND_TYPE=" + bb.Type,
+		"LLM_PROXY_BACKEND_CONFIG=" + configJSON,
+	}, nil
+}
+
+// extraEnv is appended to the current process environment before exec.
+func execPlugin(ctx context.Context, _ io.Writer, _ io.Writer, binPath string, args []string, extraEnv []string) error {
 	// Validate the path is absolute to avoid path injection.
 	if !filepath.IsAbs(binPath) {
 		return fmt.Errorf("plugin binary path must be absolute: %q", binPath)
@@ -543,7 +589,7 @@ func execPlugin(ctx context.Context, _ io.Writer, _ io.Writer, binPath string, a
 	argv := append([]string{binPath}, args...)
 	_ = argv // used below via syscall exec on unix / cmd.Run on all platforms
 
-	if err := execPluginProcess(ctx, binPath, args); err != nil {
+	if err := execPluginProcess(ctx, binPath, args, extraEnv); err != nil {
 		// Translate exec.ExitError into ExitCodeError so callers can exit
 		// with the plugin's exact code without re-printing the error.
 		var exitErr interface{ ExitCode() int }

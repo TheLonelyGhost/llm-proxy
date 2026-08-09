@@ -223,6 +223,32 @@ backend "copilot" {
 	}
 }
 
+func TestBackendConfigJSON(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "c.hcl", `
+backend "mybackend" {
+  type     = "myplugin"
+  api_base = "https://example.test"
+  models   = ["gpt-4o"]
+}
+`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := config.BackendConfigJSON(cfg.Backends[0])
+	if err != nil {
+		t.Fatalf("BackendConfigJSON: %v", err)
+	}
+
+	for _, want := range []string{`"name"`, `"mybackend"`, `"type"`, `"myplugin"`, `"api_base"`, `"https://example.test"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("BackendConfigJSON missing %s: %s", want, got)
+		}
+	}
+}
+
 func FuzzLoadHCL(f *testing.F) {
 	seeds := []string{
 		`server { port = 1 }`,

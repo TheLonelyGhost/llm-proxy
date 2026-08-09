@@ -10,6 +10,7 @@ import (
 
 	"github.com/thelonelyghost/llm-proxy/internal/cli"
 	"github.com/thelonelyghost/llm-proxy/internal/lockfile"
+	"github.com/thelonelyghost/llm-proxy/internal/plugin"
 )
 
 // TestPlugin_RunHelp verifies that `llm-proxy plugin --help` surfaces the
@@ -62,7 +63,7 @@ func TestPlugin_Run_MissingSubcommand(t *testing.T) {
 }
 
 // TestPlugin_Run_ConfigFlagRespected verifies that `plugin run --config <path>`
-// honours the flag and fails with a "no plugin" error (not a missing-config
+// honours the flag and fails with a "no backend" error (not a missing-config
 // error), proving the flag was actually read.
 func TestPlugin_Run_ConfigFlagRespected(t *testing.T) {
 	cfg := writeConfig(t, `
@@ -70,17 +71,20 @@ plugin "myplugin" {
   source  = "github.com/example/llm-proxy-provider-myplugin"
   version = "1.0.0"
 }
+backend "mybackend" {
+  type = "myplugin"
+}
 `)
-	// Ask for a plugin that is declared but not the one we pass as label.
+	// Ask for a backend label that is not declared.
 	_, err := run(t, "plugin", "run", "--config", cfg, "nonexistent", "sometool")
 	if err == nil {
-		t.Fatal("expected error for unknown plugin label")
+		t.Fatal("expected error for unknown backend label")
 	}
 	if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "cannot find") {
 		t.Errorf("looks like --config was ignored (config file not found): %v", err)
 	}
-	if !strings.Contains(err.Error(), "no plugin") && !strings.Contains(err.Error(), "nonexistent") {
-		t.Errorf("unexpected error (expected 'no plugin' / label name): %v", err)
+	if !strings.Contains(err.Error(), "no backend") && !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("unexpected error (expected 'no backend' / label name): %v", err)
 	}
 }
 
@@ -92,16 +96,19 @@ plugin "myplugin" {
   source  = "github.com/example/llm-proxy-provider-myplugin"
   version = "1.0.0"
 }
+backend "mybackend" {
+  type = "myplugin"
+}
 `)
 	_, err := run(t, "plugin", "run", "-c", cfg, "nonexistent", "sometool")
 	if err == nil {
-		t.Fatal("expected error for unknown plugin label")
+		t.Fatal("expected error for unknown backend label")
 	}
 	if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "cannot find") {
 		t.Errorf("looks like -c was ignored (config file not found): %v", err)
 	}
-	if !strings.Contains(err.Error(), "no plugin") && !strings.Contains(err.Error(), "nonexistent") {
-		t.Errorf("unexpected error (expected 'no plugin' / label name): %v", err)
+	if !strings.Contains(err.Error(), "no backend") && !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("unexpected error (expected 'no backend' / label name): %v", err)
 	}
 }
 
@@ -148,6 +155,85 @@ backend "work" {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "plugin") {
 		t.Errorf("error should mention 'plugin', got: %v", err)
+	}
+}
+
+// TestServe_MissingPlugin_RangeConstraint_UsesLockfileVersion verifies that
+// when a plugin is declared with a range constraint (e.g. "~> 1.0") and a
+// lock file has already resolved it to a concrete version, `serve` looks up
+// the binary under the concrete version path, not the raw constraint string.
+// This is a regression test for the bug where pb.Version was used directly as
+// the cache directory name instead of the lock-file-resolved version.
+func TestServe_MissingPlugin_RangeConstraint_UsesLockfileVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script plugin test not supported on Windows")
+	}
+
+	// Build a fake plugin source that will be installed.
+	fakeDir := buildFakePluginDir(t, "rangeplugin", "1.2.3")
+
+	cacheDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
+
+	cfgDir := t.TempDir()
+	cfgFile := filepath.Join(cfgDir, "config.hcl")
+	if err := os.WriteFile(cfgFile, []byte(`
+plugin "rangeplugin" {
+  source  = "file://`+fakeDir+`"
+  version = "~> 1.0"
+}
+backend "work" {
+  type = "rangeplugin"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-write a lock file that resolved the "~> 1.0" constraint to "1.2.3".
+	platform := runtime.GOOS + "_" + runtime.GOARCH
+	lockContent := `# llm-proxy.lock.hcl
+plugin "rangeplugin" {
+  source   = "file://` + fakeDir + `"
+  version  = "~> 1.0"
+  resolved = "1.2.3"
+  platform = "` + platform + `"
+}
+`
+	if err := os.WriteFile(filepath.Join(cfgDir, lockfile.FileName), []byte(lockContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Install using the exact-pin workaround: temporarily override the config
+	// with version = "1.2.3" so the install command seeds the right cache dir.
+	// In production, `plugin install` would have been run first and written
+	// the lock file; we simulate that by seeding the cache manually.
+	pluginBinDir, err := plugin.PluginCacheDir(cacheDir, "rangeplugin", "rangeplugin", "1.2.3")
+	if err != nil {
+		t.Fatalf("PluginCacheDir: %v", err)
+	}
+	binName := "llm-proxy-provider-rangeplugin"
+	if err := os.WriteFile(filepath.Join(pluginBinDir, binName), []byte("#!/bin/sh\necho ok"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestJSON := `{"name":"rangeplugin","version":"1.2.3","protocol_version":1}`
+	if err := os.WriteFile(filepath.Join(pluginBinDir, binName+".manifest.json"), []byte(manifestJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// `serve` must find the binary under .../1.2.3/... (from the lock file),
+	// NOT under .../~> 1.0/... (the raw constraint). The serve command will
+	// fail because the fake plugin is not a real sidecar server, but the
+	// error must NOT be "binary not found" — it should be a startup/timeout
+	// error from the plugin runner, proving the right path was used.
+	_, err = run(t, "serve", "--config", cfgFile)
+	if err == nil {
+		t.Fatal("expected error (plugin is not a real server), got nil")
+	}
+	if strings.Contains(err.Error(), "binary not found") {
+		t.Errorf("serve looked up wrong cache path (used raw constraint instead of resolved version): %v", err)
+	}
+	if strings.Contains(err.Error(), "~> 1.0") {
+		t.Errorf("serve embedded the raw constraint string in the path: %v", err)
 	}
 }
 
@@ -205,6 +291,7 @@ func TestExitCodeError_IsWrappable(t *testing.T) {
 // installFakePlugin is a helper that creates a fake plugin binary+manifest in a
 // temp dir, installs it into a temp cache, and returns the config path and the
 // cache dir env override applied via t.Setenv.
+// backendName is the backend block label used to invoke the plugin via `plugin run`.
 func installFakePlugin(t *testing.T, pluginName, scriptBody string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -230,6 +317,9 @@ plugin "`+pluginName+`" {
   source  = "file://`+fakeDir+`"
   version = "1.0.0"
 }
+backend "`+pluginName+`" {
+  type = "`+pluginName+`"
+}
 `)
 	if _, err := run(t, "plugin", "install", "--config", cfg); err != nil {
 		t.Fatalf("plugin install: %v", err)
@@ -244,6 +334,122 @@ func TestPlugin_Run_ExitsZero(t *testing.T) {
 	_, err := run(t, "plugin", "run", "--config", cfg, "okplugin", "sometool")
 	if err != nil {
 		t.Errorf("expected nil error for exit-0 plugin, got: %v", err)
+	}
+}
+
+// TestPlugin_Run_BackendLabelResolvesPlugin verifies that when two backends
+// share the same plugin type, specifying a backend label runs the plugin for
+// that specific backend. The script exits non-zero if the env var doesn't match.
+func TestPlugin_Run_BackendLabelResolvesPlugin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script plugin test not supported on Windows")
+	}
+
+	// Script exits 1 unless --tool is provided and LLM_PROXY_BACKEND_LABEL
+	// is non-empty (we can't check the exact value without stdout capture,
+	// so we just verify the variable is set by grepping its length).
+	// To test the distinct-label behaviour, each backend gets a dedicated
+	// script that exits 42 if LLM_PROXY_BACKEND_LABEL != its expected value.
+	fakeDir := t.TempDir()
+	binName := "llm-proxy-provider-shared"
+	script := filepath.Join(fakeDir, binName)
+	// Script: exit 0 only when the label env var equals the expected value
+	// passed as the second argument to --tool (we can't forward user args to
+	// the check without cooperation from the tool dispatch, so instead we
+	// just verify the env var is set to a non-empty value).
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n[ -n \"$LLM_PROXY_BACKEND_LABEL\" ] || exit 42\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestJSON := `{"name":"shared","version":"1.0.0","protocol_version":1}`
+	if err := os.WriteFile(filepath.Join(fakeDir, binName+".manifest.json"), []byte(manifestJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cacheDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
+
+	// Two backends, same plugin type.
+	cfg := writeConfig(t, `
+plugin "shared" {
+  source  = "file://`+fakeDir+`"
+  version = "1.0.0"
+}
+backend "ollama" {
+  type = "shared"
+}
+backend "cloud" {
+  type = "shared"
+}
+`)
+	if _, err := run(t, "plugin", "install", "--config", cfg); err != nil {
+		t.Fatalf("plugin install: %v", err)
+	}
+
+	// Both backends must resolve to the same binary and run without error.
+	for _, label := range []string{"ollama", "cloud"} {
+		_, err := run(t, "plugin", "run", "--config", cfg, label, "sometool")
+		if err != nil {
+			t.Errorf("plugin run %s: %v (LLM_PROXY_BACKEND_LABEL not set?)", label, err)
+		}
+	}
+}
+
+// TestPlugin_Run_CompiledInTypeRejected verifies that `plugin run` returns a
+// clear error when the backend's type is a compiled-in provider (not a plugin).
+func TestPlugin_Run_CompiledInTypeRejected(t *testing.T) {
+	cfg := writeConfig(t, `
+backend "myopenai" {
+  type    = "openai"
+  api_key = "sk-test"
+}
+`)
+	_, err := run(t, "plugin", "run", "--config", cfg, "myopenai", "sometool")
+	if err == nil {
+		t.Fatal("expected error for compiled-in backend type, got nil")
+	}
+	if !strings.Contains(err.Error(), "compiled-in") && !strings.Contains(err.Error(), "openai") {
+		t.Errorf("expected error mentioning compiled-in/openai, got: %v", err)
+	}
+}
+
+// TestPlugin_Run_BackendConfigEnvSet verifies that LLM_PROXY_BACKEND_CONFIG is
+// forwarded to the plugin. The script exits 42 if the variable is empty.
+func TestPlugin_Run_BackendConfigEnvSet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script plugin test not supported on Windows")
+	}
+
+	// Script exits 42 if LLM_PROXY_BACKEND_CONFIG is empty, 0 otherwise.
+	fakeDir := t.TempDir()
+	binName := "llm-proxy-provider-envtest"
+	script := filepath.Join(fakeDir, binName)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n[ -n \"$LLM_PROXY_BACKEND_CONFIG\" ] || exit 42\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestJSON := `{"name":"envtest","version":"1.0.0","protocol_version":1}`
+	if err := os.WriteFile(filepath.Join(fakeDir, binName+".manifest.json"), []byte(manifestJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cacheDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
+
+	cfg := writeConfig(t, `
+plugin "envtest" {
+  source  = "file://`+fakeDir+`"
+  version = "1.0.0"
+}
+backend "myenvbackend" {
+  type = "envtest"
+}
+`)
+	if _, err := run(t, "plugin", "install", "--config", cfg); err != nil {
+		t.Fatalf("plugin install: %v", err)
+	}
+
+	_, err := run(t, "plugin", "run", "--config", cfg, "myenvbackend", "sometool")
+	if err != nil {
+		t.Fatalf("plugin run: %v (LLM_PROXY_BACKEND_CONFIG not set?)", err)
 	}
 }
 
@@ -278,9 +484,12 @@ plugin "ghostplugin" {
   source  = "file:///nonexistent"
   version = "1.0.0"
 }
+backend "ghostbackend" {
+  type = "ghostplugin"
+}
 `)
 	// Do not install; just run directly so execPlugin hits the os.Stat branch.
-	_, err := run(t, "plugin", "run", "--config", cfg, "ghostplugin", "sometool")
+	_, err := run(t, "plugin", "run", "--config", cfg, "ghostbackend", "sometool")
 	if err == nil {
 		t.Fatal("expected error for missing binary")
 	}

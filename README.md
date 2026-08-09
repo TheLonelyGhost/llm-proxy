@@ -23,13 +23,20 @@ any `Authorization` headers sent to it and injecting its own for each upstream p
 # 1. Build
 task build
 
-# 2. Authorise the proxy with your provider (one-time, if the plugin requires it).
-./bin/llm-proxy login --config examples/config.hcl
+# 2. Copy example manifest
+mkdir -p ~/.config/llm-proxy
+cp ./examples/config.hcl ~/.config/llm-proxy/config.hcl
 
-# 3. Run the server.
-./bin/llm-proxy serve --config examples/config.hcl
+# 3. Install any external plugins
+./bin/llm-proxy plugin install
 
-# 4. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
+# 4. Authorize the proxy with your provider (one-time, if the plugin requires it).
+./bin/llm-proxy plugin run ibmbob login
+
+# 5. Run the server.
+./bin/llm-proxy serve
+
+# 6. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
 #    ask for a backend-prefixed model.
 curl http://127.0.0.1:4980/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -65,9 +72,8 @@ schema, endpoint reference, routing rules, and security notes.
 | Command | Description |
 |---|---|
 | `llm-proxy serve` | Start the proxy server |
-| `llm-proxy providers list-models <backend>` | Query a backend's upstream model catalogue |
 | `llm-proxy plugin install` | Download and verify declared plugins |
-| `llm-proxy plugin run <label> <subcommand>` | Run a plugin tooling subcommand (e.g. `login`) |
+| `llm-proxy plugin run <label> <subcommand>` | Run a plugin tooling subcommand (e.g. `login`, `list-models`) |
 
 Pass `-c` / `--config` to any command to specify a config file or directory.
 Run any command with `--help` for the full flag list.
