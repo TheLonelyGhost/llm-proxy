@@ -21,12 +21,28 @@ The runtime index of all active backends, keyed by Backend Name. Populated once 
 _Avoid_: backend registry, reg
 
 **Backend**:
-A configured, named, running instance of a provider. Defined by a `backend` HCL block, registered in the Registry, and addressed by clients via its Backend Name.
-_Avoid_: provider (when referring to the instance), plugin
+A configured, named, running instance of a provider. Defined by a `backend` HCL block, registered in the Registry, and addressed by clients via its Backend Name. A backend may be backed by a compiled-in Provider or by a Plugin.
+_Avoid_: provider (when referring to the instance)
 
 **Provider**:
-The implementation type that backs one or more backends (e.g. `"github-copilot"`, `"ibm-bob"`, `"openai"`). A single provider type can be instantiated as multiple backends with different names and credentials.
+The implementation type that backs one or more backends (e.g. `"github-copilot"`, `"ibm-bob"`, `"openai"`). A single provider type can be instantiated as multiple backends with different names and credentials. A provider is either compiled into the core binary or delivered as a Plugin.
 _Avoid_: backend (when referring to the implementation type)
+
+**Plugin**:
+An external binary that implements both an OpenAI-compatible HTTP sidecar (for request handling during `serve`) and a CLI tooling host (for operator workflows invoked via `llm-proxy plugin run`). The proxy manages the plugin's process lifecycle. Declared in the Configuration via a `plugin` HCL block and referenced by `backend` blocks via `type`.
+_Avoid_: provider binary, external provider, sidecar
+
+**Plugin Manifest**:
+A JSON file (`llm-proxy-provider-<name>.manifest.json`) shipped alongside the plugin binary in its release archive. Declares the plugin name, version, protocol version, optional port-env-var override, health/reload endpoint paths, and the list of Tool subcommands the plugin exposes.
+_Avoid_: manifest file, plugin config
+
+**Tool**:
+A named CLI subcommand exposed by a Plugin and declared in its Plugin Manifest. Invoked by the proxy (or directly by the operator) as `llm-proxy plugin run <backend-label> <tool-name>`, which exec-s the plugin binary with `--tool <tool-name>`. Conventional tool names are `login`, `logout`, `list-models`, and `budget`.
+_Avoid_: plugin command, plugin subcommand
+
+**Backend Label**:
+The `backend` block label used to address a specific backend instance when invoking a Tool. Passed to the plugin binary as `LLM_PROXY_BACKEND_LABEL`. Identical to Backend Name; the term "label" is preferred in the context of `llm-proxy plugin run` and plugin-authored tooling to distinguish it from the routing-prefix usage.
+_Avoid_: backend name (in the plugin tooling context)
 
 **Backend Name**:
 The stable, lowercase identifier that names a backend instance. Serves as the routing prefix in a Qualified Model ID, the HCL block label, and the Registry key. Must be unique, lowercase, and free of `/` characters.

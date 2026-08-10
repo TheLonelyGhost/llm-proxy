@@ -67,6 +67,10 @@ type Entry struct {
 	Resolved string
 	// Platform is the "os_arch" tuple for which this entry was resolved.
 	Platform string
+	// Checksum is the lowercase hex-encoded SHA-256 digest of the installed
+	// plugin binary. Empty when the entry was written by an older version of
+	// llm-proxy that did not record checksums.
+	Checksum string
 }
 
 // Lockfile holds all recorded plugin entries.
@@ -81,6 +85,7 @@ type hclPluginBlock struct {
 	Constraint string `hcl:"version"`
 	Resolved   string `hcl:"resolved"`
 	Platform   string `hcl:"platform"`
+	Checksum   string `hcl:"checksum,optional"`
 }
 
 // hclLockFile is the top-level HCL decode target.
@@ -163,6 +168,7 @@ func Read(path string) (*Lockfile, error) {
 			Constraint: pb.Constraint,
 			Resolved:   pb.Resolved,
 			Platform:   pb.Platform,
+			Checksum:   pb.Checksum,
 		})
 	}
 	return lf, nil
@@ -189,6 +195,9 @@ func Write(path string, lf *Lockfile) error {
 		body.SetAttributeValue("version", cty.StringVal(e.Constraint))
 		body.SetAttributeValue("resolved", cty.StringVal(e.Resolved))
 		body.SetAttributeValue("platform", cty.StringVal(e.Platform))
+		if e.Checksum != "" {
+			body.SetAttributeValue("checksum", cty.StringVal(e.Checksum))
+		}
 	}
 
 	content := []byte(header)

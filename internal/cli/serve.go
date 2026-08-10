@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -236,6 +237,21 @@ func buildSidecarBackend(ctx context.Context, b config.BackendBlock, pb config.P
 			"plugin %q: binary not found at %q — run `llm-proxy plugin install` first",
 			pb.Name, binPath,
 		)
+	}
+
+	// Checksum verification: if the lock file recorded a checksum, verify the
+	// on-disk binary has not been tampered with.
+	if entry, ok := lf.Lookup(pb.Name); ok && entry.Checksum != "" {
+		actualHex, hashErr := hashFile(binPath)
+		if hashErr != nil {
+			return nil, fmt.Errorf("plugin %q: hash binary: %w", pb.Name, hashErr)
+		}
+		if !strings.EqualFold(actualHex, entry.Checksum) {
+			return nil, fmt.Errorf(
+				"plugin %q: checksum mismatch — binary at %q has been modified (got %s, lock file expects %s); run `llm-proxy plugin install` to reinstall",
+				pb.Name, binPath, actualHex, entry.Checksum,
+			)
+		}
 	}
 
 	// Read the manifest so we can honour the plugin's declared port env var

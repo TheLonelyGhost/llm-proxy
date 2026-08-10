@@ -195,3 +195,75 @@ func TestListReleaseTags_NilClient(t *testing.T) {
 		t.Fatal("expected error for cancelled context")
 	}
 }
+
+// ---- FetchChecksumFile ------------------------------------------------------
+
+// TestFetchChecksumFile_Basic verifies that a well-formed SHA256SUMS file is
+// parsed into a filename→hex map.
+func TestFetchChecksumFile_Basic(t *testing.T) {
+	body := "abc123  file1.tar.gz\ndef456  file2.tar.gz\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	client := clientForServer(t, srv)
+
+	got, err := github.FetchChecksumFile(context.Background(), client, srv.URL+"/SHA256SUMS")
+	if err != nil {
+		t.Fatalf("FetchChecksumFile: %v", err)
+	}
+	if got["file1.tar.gz"] != "abc123" {
+		t.Errorf("file1.tar.gz = %q, want %q", got["file1.tar.gz"], "abc123")
+	}
+	if got["file2.tar.gz"] != "def456" {
+		t.Errorf("file2.tar.gz = %q, want %q", got["file2.tar.gz"], "def456")
+	}
+}
+
+// TestFetchChecksumFile_SkipsMalformedLines verifies that lines without exactly
+// two whitespace-separated fields are silently skipped.
+func TestFetchChecksumFile_SkipsMalformedLines(t *testing.T) {
+	body := "goodhex  good.tar.gz\nbadline\n  \n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	client := clientForServer(t, srv)
+
+	got, err := github.FetchChecksumFile(context.Background(), client, srv.URL+"/SHA256SUMS")
+	if err != nil {
+		t.Fatalf("FetchChecksumFile: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d entries, want 1: %v", len(got), got)
+	}
+	if got["good.tar.gz"] != "goodhex" {
+		t.Errorf("good.tar.gz = %q, want %q", got["good.tar.gz"], "goodhex")
+	}
+}
+
+// TestFetchChecksumFile_HTTPError verifies that a non-200 response returns an
+// error.
+func TestFetchChecksumFile_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	client := clientForServer(t, srv)
+
+	_, err := github.FetchChecksumFile(context.Background(), client, srv.URL+"/SHA256SUMS")
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+}
+
+// TestFetchChecksumFile_NilClient verifies that nil uses http.DefaultClient
+// (exercises the nil-guard, cancelled context prevents real traffic).
+func TestFetchChecksumFile_NilClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := github.FetchChecksumFile(ctx, nil, "https://example.com/SHA256SUMS")
+	if err == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+}

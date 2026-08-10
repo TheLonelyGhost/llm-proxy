@@ -45,6 +45,9 @@ plugin "<label>" {
   source  = "github.com/<org>/llm-proxy-provider-<name>"
   version = "~> 1.0"
 
+  # Checksum verification (optional; auto-derived for github.com sources)
+  checksum_url = "https://releases.example.com/myprovider/{version}/SHA256SUMS"
+
   # Health-check tuning (all optional; see defaults below)
   health_interval  = "10s"
   health_timeout   = "5s"
@@ -57,6 +60,10 @@ plugin "<label>" {
   restart_backoff_cap     = "60s"
 }
 ```
+
+`checksum_url` supports the same placeholders as `source`: `{version}`,
+`{os}`, `{arch}`. For `github.com` sources it is derived automatically and
+should be omitted.
 
 The `<label>` must be unique, lowercase, and must not collide with a compiled-in
 provider type name (`openai`). A collision is a hard config-load error.
@@ -122,8 +129,8 @@ on Linux/macOS, `%LocalAppData%\llm-proxy\` on Windows):
 
 `llm-proxy plugin install` writes `llm-proxy.lock.hcl` alongside your config
 file after resolving version constraints. It records the exact resolved version
-and SHA256 checksum per plugin per OS/arch. Commit this file to version control
-for reproducible deployments.
+and SHA-256 archive checksum per plugin per OS/arch. Commit this file to
+version control for reproducible deployments.
 
 `llm-proxy serve` verifies the cached binary checksum against the lockfile at
 startup.

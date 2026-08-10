@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -158,7 +160,11 @@ func installPlugin(ctx context.Context, out io.Writer, pb config.PluginBlock, ca
 	binPath := filepath.Join(destDir, plugin.BinaryName(pb.Name))
 	if _, statErr := os.Stat(binPath); statErr == nil {
 		fmt.Fprintf(out, "Plugin %q version %s already cached, skipping download.\n", pb.Name, concreteVersion) //nolint:errcheck
-		updateLockfile(lf, pb, concreteVersion)
+		checksum, hashErr := hashFile(binPath)
+		if hashErr != nil {
+			return fmt.Errorf("hash cached binary: %w", hashErr)
+		}
+		updateLockfile(lf, pb, concreteVersion, checksum)
 		return nil
 	}
 
@@ -170,7 +176,8 @@ func installPlugin(ctx context.Context, out io.Writer, pb config.PluginBlock, ca
 
 	fmt.Fprintf(out, "Installing plugin %q version %s from %s\n", pb.Name, concreteVersion, source) //nolint:errcheck
 
-	if err := fetchPlugin(ctx, source, createdDestDir, pb.Name); err != nil {
+	checksumURL := resolveChecksumURL(pb.Source, pb.ChecksumURL, concreteVersion)
+	if err := fetchPluginWithChecksum(ctx, source, checksumURL, createdDestDir, pb.Name); err != nil {
 		return fmt.Errorf("fetch plugin: %w", err)
 	}
 
@@ -190,7 +197,12 @@ func installPlugin(ctx context.Context, out io.Writer, pb config.PluginBlock, ca
 		return fmt.Errorf("chmod binary %q: %w", finalBin, err)
 	}
 
-	updateLockfile(lf, pb, concreteVersion)
+	checksum, err := hashFile(finalBin)
+	if err != nil {
+		return fmt.Errorf("hash installed binary: %w", err)
+	}
+
+	updateLockfile(lf, pb, concreteVersion, checksum)
 	fmt.Fprintf(out, "Plugin %q version %s installed successfully.\n", pb.Name, concreteVersion) //nolint:errcheck
 	return nil
 }
@@ -258,14 +270,31 @@ func resolvePluginVersion(
 	return concreteVersion, src, nil
 }
 
-// updateLockfile records the resolved version into lf for the given plugin.
-func updateLockfile(lf *lockfile.Lockfile, pb config.PluginBlock, concreteVersion string) {
+// updateLockfile records the resolved version and binary checksum into lf for
+// the given plugin.
+func updateLockfile(lf *lockfile.Lockfile, pb config.PluginBlock, concreteVersion, checksum string) {
 	lf.Set(lockfile.Entry{
 		Name:       pb.Name,
 		Source:     pb.Source,
 		Constraint: pb.Version,
 		Resolved:   concreteVersion,
+		Checksum:   checksum,
 	})
+}
+
+// hashFile returns the lowercase hex-encoded SHA-256 digest of the file at
+// path.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path) //nolint:gosec // operator-controlled cache path
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 // resolveVersion resolves a version constraint string to a concrete version.
@@ -324,16 +353,17 @@ func resolveVersion(ctx context.Context, httpClient *http.Client, source, versio
 	return best, nil
 }
 
-// fetchPlugin downloads the plugin source into destDir.
-// For file:// sources it copies the directory contents.
-// For http/https sources it downloads and extracts a tar.gz archive.
-func fetchPlugin(ctx context.Context, src, destDir, pluginName string) error {
+// fetchPluginWithChecksum downloads the plugin source into destDir.
+// For file:// sources it copies the directory contents (no checksum).
+// For http/https sources it downloads and extracts a tar.gz archive, and if
+// checksumURL is non-empty the extracted binary is verified against SHA256SUMS.
+func fetchPluginWithChecksum(ctx context.Context, src, checksumURL, destDir, pluginName string) error {
 	if strings.HasPrefix(src, "file://") {
 		fileDir := strings.TrimPrefix(src, "file://")
 		return copyDir(fileDir, destDir)
 	}
 	// HTTP/HTTPS: download archive and extract.
-	return downloadAndExtract(ctx, src, destDir, pluginName)
+	return downloadAndExtract(ctx, nil, src, checksumURL, destDir, pluginName)
 }
 
 // copyDir copies all files from srcDir into destDir.
@@ -378,13 +408,39 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// downloadAndExtract downloads an archive from url and extracts it into destDir.
-func downloadAndExtract(ctx context.Context, archiveURL, destDir, _ string) error {
+// downloadAndExtract downloads an archive from archiveURL and extracts it into destDir.
+// If checksumURL is non-empty, the SHA256SUMS file at that URL is fetched and
+// the archive's SHA-256 is verified against the entry for the archive filename
+// before extraction. A mismatch is a hard error.
+//
+// client may be nil (http.DefaultClient is used).
+func downloadAndExtract(ctx context.Context, client *http.Client, archiveURL, checksumURL, destDir, _ string) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	// Fetch the checksum map first (if requested) so we can verify the
+	// archive before touching the filesystem.
+	var expectedHex string
+	if checksumURL != "" {
+		sums, fetchErr := github.FetchChecksumFile(ctx, client, checksumURL)
+		if fetchErr != nil {
+			return fmt.Errorf("fetch checksum file: %w", fetchErr)
+		}
+		archiveName := filepath.Base(archiveURL)
+		hex, ok := sums[archiveName]
+		if !ok {
+			return fmt.Errorf("checksum verification failed: %q not found in SHA256SUMS from %s",
+				archiveName, checksumURL)
+		}
+		expectedHex = hex
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, archiveURL, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download %q: %w", archiveURL, err)
 	}
@@ -395,10 +451,28 @@ func downloadAndExtract(ctx context.Context, archiveURL, destDir, _ string) erro
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %q: HTTP %d", archiveURL, resp.StatusCode)
 	}
+
+	// If we need to verify, buffer the archive so we can hash it.
+	var archiveReader io.Reader = resp.Body
+	if expectedHex != "" {
+		archiveBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("read archive %q: %w", archiveURL, readErr)
+		}
+		h := sha256.New()
+		h.Write(archiveBytes)
+		actualHex := fmt.Sprintf("%x", h.Sum(nil))
+		if !strings.EqualFold(actualHex, expectedHex) {
+			return fmt.Errorf("checksum mismatch for %q: got %s, want %s",
+				filepath.Base(archiveURL), actualHex, expectedHex)
+		}
+		archiveReader = bytes.NewReader(archiveBytes) // wrap bytes as reader
+	}
+
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return fmt.Errorf("create dest dir: %w", err)
 	}
-	return extractTarGz(resp.Body, destDir)
+	return extractTarGz(archiveReader, destDir)
 }
 
 // resolveSource constructs a download source URL from the plugin block's
@@ -437,6 +511,36 @@ func buildGitHubReleaseURL(source, pluginName, version string) string {
 	)
 	return fmt.Sprintf("https://%s/releases/download/v%s/%s",
 		source, version, archiveName)
+}
+
+// buildGitHubChecksumURL constructs the GitHub Releases download URL for the
+// SHA256SUMS file corresponding to a plugin release.
+func buildGitHubChecksumURL(source, version string) string {
+	source = strings.TrimRight(source, "/")
+	return fmt.Sprintf("https://%s/releases/download/v%s/SHA256SUMS",
+		source, version)
+}
+
+// resolveChecksumURL returns the checksum URL to use for a plugin installation.
+//
+// Priority:
+//  1. An explicit checksumURL field from the plugin block (after placeholder
+//     substitution).
+//  2. Auto-derived from a github.com source.
+//  3. Empty string (no verification).
+func resolveChecksumURL(source, explicitChecksumURL, version string) string {
+	if explicitChecksumURL != "" {
+		r := strings.NewReplacer(
+			"{version}", version,
+			"{os}", runtime.GOOS,
+			"{arch}", runtime.GOARCH,
+		)
+		return r.Replace(explicitChecksumURL)
+	}
+	if strings.HasPrefix(source, "github.com/") {
+		return buildGitHubChecksumURL(source, version)
+	}
+	return ""
 }
 
 // sourceNamespace returns the (namespace, name) pair used for cache directory

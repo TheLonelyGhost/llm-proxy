@@ -1,7 +1,16 @@
 package cli_test
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -134,8 +143,106 @@ backend "myopenai" {
 	}
 }
 
-// TestServe_MissingPlugin verifies that `serve` hard-fails when a backend
-// references a plugin type that is not installed.
+// TestServe_ChecksumMismatch verifies that `serve` hard-fails when the
+// installed binary's SHA-256 does not match the checksum recorded in the lock
+// file, protecting against tampered or corrupted binaries.
+func TestServe_ChecksumMismatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script plugin test not supported on Windows")
+	}
+
+	fakeDir := buildFakePluginDir(t, "cksumguardplugin", "1.0.0")
+
+	cacheDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
+
+	cfgDir := t.TempDir()
+	cfgFile := filepath.Join(cfgDir, "config.hcl")
+	if err := os.WriteFile(cfgFile, []byte(`
+plugin "cksumguardplugin" {
+  source  = "file://`+fakeDir+`"
+  version = "1.0.0"
+}
+backend "work" {
+  type = "cksumguardplugin"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Install normally so the binary is cached.
+	if _, err := run(t, "plugin", "install", "--config", cfgFile); err != nil {
+		t.Fatalf("plugin install: %v", err)
+	}
+
+	// Tamper: overwrite the lock file with a wrong checksum.
+	lockPath := filepath.Join(cfgDir, lockfile.FileName)
+	lf, err := lockfile.Read(lockPath)
+	if err != nil {
+		t.Fatalf("read lock file: %v", err)
+	}
+	entry, ok := lf.Lookup("cksumguardplugin")
+	if !ok {
+		t.Fatal("lock file missing entry")
+	}
+	entry.Checksum = strings.Repeat("0", 64) // wrong
+	lf.Set(entry)
+	if err := lockfile.Write(lockPath, lf); err != nil {
+		t.Fatalf("write tampered lock file: %v", err)
+	}
+
+	// `serve` must hard-fail with a checksum error, not a startup/binary error.
+	_, err = run(t, "serve", "--config", cfgFile)
+	if err == nil {
+		t.Fatal("expected error for checksum mismatch, got nil")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "checksum") {
+		t.Errorf("expected error mentioning 'checksum', got: %v", err)
+	}
+}
+
+// TestServe_ChecksumMatch verifies that `serve` succeeds (past the checksum
+// gate) when the lock file checksum matches the installed binary. The serve
+// command will still fail because the plugin is not a real sidecar server, but
+// the error must NOT be a checksum error.
+func TestServe_ChecksumMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script plugin test not supported on Windows")
+	}
+
+	fakeDir := buildFakePluginDir(t, "cksumokplugin", "1.0.0")
+
+	cacheDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
+
+	cfgDir := t.TempDir()
+	cfgFile := filepath.Join(cfgDir, "config.hcl")
+	if err := os.WriteFile(cfgFile, []byte(`
+plugin "cksumokplugin" {
+  source  = "file://`+fakeDir+`"
+  version = "1.0.0"
+}
+backend "work" {
+  type = "cksumokplugin"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := run(t, "plugin", "install", "--config", cfgFile); err != nil {
+		t.Fatalf("plugin install: %v", err)
+	}
+
+	// `serve` will fail (plugin is not a real server) but must NOT fail with a
+	// checksum error.
+	_, err := run(t, "serve", "--config", cfgFile)
+	if err == nil {
+		t.Fatal("expected error (plugin is not a real server), got nil")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "checksum") {
+		t.Errorf("unexpected checksum error when checksums match: %v", err)
+	}
+}
 func TestServe_MissingPlugin(t *testing.T) {
 	cacheDir := t.TempDir()
 	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
@@ -767,5 +874,288 @@ plugin "upgcacheplugin" {
 	}
 	if !strings.Contains(out, "already cached") {
 		t.Errorf("expected 'already cached' when upgrade resolves to already-cached version:\n%s", out)
+	}
+}
+
+// ---- SHA-256 checksum recording --------------------------------------------
+
+// TestPlugin_Install_RecordsChecksumInLockfile verifies that after a fresh
+// install, the lock file entry contains a non-empty checksum that matches the
+// SHA-256 of the installed binary.
+func TestPlugin_Install_RecordsChecksumInLockfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script test not supported on Windows")
+	}
+	fakeDir := buildFakePluginDir(t, "cksumplugin", "1.0.0")
+
+	cacheDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
+
+	cfgDir := t.TempDir()
+	cfgFile := filepath.Join(cfgDir, "config.hcl")
+	if err := os.WriteFile(cfgFile, []byte(`
+plugin "cksumplugin" {
+  source  = "file://`+fakeDir+`"
+  version = "1.0.0"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := run(t, "plugin", "install", "--config", cfgFile); err != nil {
+		t.Fatalf("plugin install: %v", err)
+	}
+
+	lockPath := filepath.Join(cfgDir, lockfile.FileName)
+	lf, err := lockfile.Read(lockPath)
+	if err != nil {
+		t.Fatalf("read lock file: %v", err)
+	}
+	entry, ok := lf.Lookup("cksumplugin")
+	if !ok {
+		t.Fatal("lock file missing entry for 'cksumplugin'")
+	}
+	if entry.Checksum == "" {
+		t.Fatal("lock file entry has empty Checksum after install")
+	}
+
+	// Verify the checksum matches the on-disk binary.
+	namespace, name := "cksumplugin", "cksumplugin"
+	destDir := plugin.PluginCacheDirNoCreate(cacheDir, namespace, name, "1.0.0")
+	binPath := filepath.Join(destDir, plugin.BinaryName("cksumplugin"))
+	f, openErr := os.Open(binPath)
+	if openErr != nil {
+		t.Fatalf("open binary: %v", openErr)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, copyErr := io.Copy(h, f); copyErr != nil {
+		t.Fatalf("hash binary: %v", copyErr)
+	}
+	want := fmt.Sprintf("%x", h.Sum(nil))
+	if entry.Checksum != want {
+		t.Errorf("Checksum = %q, want %q", entry.Checksum, want)
+	}
+}
+
+// TestPlugin_Install_ChecksumStableOnRepeatInstall verifies that running
+// `plugin install` a second time (cache hit path) preserves the existing
+// checksum in the lock file unchanged.
+func TestPlugin_Install_ChecksumStableOnRepeatInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script test not supported on Windows")
+	}
+	fakeDir := buildFakePluginDir(t, "ckstableplugin", "1.0.0")
+
+	cacheDir := t.TempDir()
+	t.Setenv("LLM_PROXY_CACHE_DIR", cacheDir)
+
+	cfgDir := t.TempDir()
+	cfgFile := filepath.Join(cfgDir, "config.hcl")
+	if err := os.WriteFile(cfgFile, []byte(`
+plugin "ckstableplugin" {
+  source  = "file://`+fakeDir+`"
+  version = "1.0.0"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := run(t, "plugin", "install", "--config", cfgFile); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	lockPath := filepath.Join(cfgDir, lockfile.FileName)
+	lf1, err := lockfile.Read(lockPath)
+	if err != nil {
+		t.Fatalf("read lock after first install: %v", err)
+	}
+	e1, _ := lf1.Lookup("ckstableplugin")
+
+	if _, err := run(t, "plugin", "install", "--config", cfgFile); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+
+	lf2, err := lockfile.Read(lockPath)
+	if err != nil {
+		t.Fatalf("read lock after second install: %v", err)
+	}
+	e2, _ := lf2.Lookup("ckstableplugin")
+
+	if e1.Checksum == "" {
+		t.Fatal("first install produced empty checksum")
+	}
+	if e1.Checksum != e2.Checksum {
+		t.Errorf("checksum changed on repeat install: %q vs %q", e1.Checksum, e2.Checksum)
+	}
+}
+
+// ---- SHA256SUMS remote verification ----------------------------------------
+
+// buildPluginArchive creates a .tar.gz containing the binary and manifest from
+// pluginDir and returns the archive bytes.
+func buildPluginArchive(t *testing.T, pluginDir string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	entries, err := os.ReadDir(pluginDir)
+	if err != nil {
+		t.Fatalf("read plugin dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(pluginDir, e.Name())
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if err := tw.WriteHeader(&tar.Header{
+			Name: e.Name(),
+			Mode: 0o755,
+			Size: int64(len(data)),
+		}); err != nil {
+			t.Fatalf("write header: %v", err)
+		}
+		if _, err := tw.Write(data); err != nil {
+			t.Fatalf("write data: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// archiveBinaryName returns the expected archive filename for a plugin on the
+// current platform, matching the convention in buildGitHubReleaseURL.
+func archiveBinaryName(pluginName, version string) string {
+	return fmt.Sprintf("llm-proxy-provider-%s_%s_%s_%s.tar.gz",
+		pluginName, version, runtime.GOOS, runtime.GOARCH)
+}
+
+// newChecksumServer returns an httptest.Server that serves a .tar.gz archive
+// at /releases/download/v<version>/<archiveName> and the corresponding
+// SHA256SUMS file. It returns the server URL root and a cleanup func.
+// If badChecksum is true, the SHA256SUMS file contains a wrong hex value.
+func newChecksumServer(t *testing.T, pluginName, version string, archiveBytes []byte, badChecksum bool) *httptest.Server {
+	t.Helper()
+	archiveName := archiveBinaryName(pluginName, version)
+
+	// Compute the real SHA-256 of the archive for use in SHA256SUMS.
+	h := sha256.New()
+	h.Write(archiveBytes)
+	realHex := fmt.Sprintf("%x", h.Sum(nil))
+
+	checksumHex := realHex
+	if badChecksum {
+		checksumHex = strings.Repeat("0", 64) // wrong
+	}
+	sumsBody := checksumHex + "  " + archiveName + "\n"
+
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "SHA256SUMS"):
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(sumsBody))
+		case strings.HasSuffix(r.URL.Path, ".tar.gz"):
+			w.Header().Set("Content-Type", "application/gzip")
+			_, _ = w.Write(archiveBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// TestDownloadAndExtract_VerifiesChecksumFromSumsFile verifies that when a
+// checksum URL is provided, the installed binary's SHA-256 is verified against
+// the downloaded SHA256SUMS file and succeeds when they match.
+func TestDownloadAndExtract_VerifiesChecksumFromSumsFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sha256sums test not supported on Windows")
+	}
+
+	pluginName := "sha256testplugin"
+	version := "1.0.0"
+	fakeDir := buildFakePluginDir(t, pluginName, version)
+	archive := buildPluginArchive(t, fakeDir)
+
+	srv := newChecksumServer(t, pluginName, version, archive, false)
+	t.Cleanup(srv.Close)
+
+	archiveName := archiveBinaryName(pluginName, version)
+	archiveURL := srv.URL + "/releases/download/v" + version + "/" + archiveName
+	checksumURL := srv.URL + "/releases/download/v" + version + "/SHA256SUMS"
+	destDir := t.TempDir()
+
+	err := cli.DownloadAndExtractForTest(context.Background(), srv.Client(), archiveURL, checksumURL, destDir, pluginName)
+	if err != nil {
+		t.Fatalf("DownloadAndExtract with matching checksum: %v", err)
+	}
+	// Binary must exist in destDir.
+	binPath := filepath.Join(destDir, plugin.BinaryName(pluginName))
+	if _, statErr := os.Stat(binPath); statErr != nil {
+		t.Errorf("binary not found after extract: %v", statErr)
+	}
+}
+
+// TestDownloadAndExtract_RejectsChecksumMismatch verifies that a mismatch
+// between the downloaded binary's checksum and the SHA256SUMS file causes a
+// hard error and removes the destination directory.
+func TestDownloadAndExtract_RejectsChecksumMismatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sha256sums test not supported on Windows")
+	}
+
+	pluginName := "sha256mismatchplugin"
+	version := "1.0.0"
+	fakeDir := buildFakePluginDir(t, pluginName, version)
+	archive := buildPluginArchive(t, fakeDir)
+
+	srv := newChecksumServer(t, pluginName, version, archive, true /* bad checksum */)
+	t.Cleanup(srv.Close)
+
+	archiveName := archiveBinaryName(pluginName, version)
+	archiveURL := srv.URL + "/releases/download/v" + version + "/" + archiveName
+	checksumURL := srv.URL + "/releases/download/v" + version + "/SHA256SUMS"
+	destDir := t.TempDir()
+
+	err := cli.DownloadAndExtractForTest(context.Background(), srv.Client(), archiveURL, checksumURL, destDir, pluginName)
+	if err == nil {
+		t.Fatal("expected checksum mismatch error, got nil")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "checksum") {
+		t.Errorf("expected error mentioning 'checksum', got: %v", err)
+	}
+}
+
+// TestDownloadAndExtract_NoChecksumURL verifies that omitting the checksum
+// URL (empty string) skips verification and still extracts successfully.
+func TestDownloadAndExtract_NoChecksumURL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sha256sums test not supported on Windows")
+	}
+
+	pluginName := "nochecksumplugin"
+	version := "1.0.0"
+	fakeDir := buildFakePluginDir(t, pluginName, version)
+	archive := buildPluginArchive(t, fakeDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	t.Cleanup(srv.Close)
+
+	archiveURL := srv.URL + "/plugin.tar.gz"
+	destDir := t.TempDir()
+
+	err := cli.DownloadAndExtractForTest(context.Background(), srv.Client(), archiveURL, "" /* no checksum URL */, destDir, pluginName)
+	if err != nil {
+		t.Fatalf("DownloadAndExtract without checksum URL: %v", err)
 	}
 }

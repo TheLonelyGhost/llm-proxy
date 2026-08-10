@@ -20,6 +20,7 @@ plugin "<label>" {
   version  = "~> 1.0"       # constraint from config
   resolved = "1.2.3"        # concrete version selected
   platform = "darwin_arm64" # os_arch at resolution time
+  checksum = "<sha256hex>"  # SHA-256 of the downloaded archive
 }
 ```
 
@@ -29,6 +30,7 @@ plugin "<label>" {
 | `version`  | Mirrors the version constraint from the `plugin` block.    |
 | `resolved` | The concrete version that was selected and downloaded.     |
 | `platform` | The `GOOS_GOARCH` value at the time `plugin install` ran.  |
+| `checksum` | Lowercase hex SHA-256 of the downloaded plugin archive. Recorded on install; verified by `serve` at startup. Absent in lock files written by older releases (verification skipped when empty). |
 
 ## Resolution priority
 

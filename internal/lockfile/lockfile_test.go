@@ -382,3 +382,81 @@ func TestNormalisePlatform(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// ---- Checksum field ---------------------------------------------------------
+
+// TestWrite_RoundTrip_WithChecksum verifies that a non-empty Checksum field
+// survives a Write→Read round-trip.
+func TestWrite_RoundTrip_WithChecksum(t *testing.T) {
+	dir := t.TempDir()
+	lf := &lockfile.Lockfile{}
+	lf.Set(lockfile.Entry{
+		Name:       "myplugin",
+		Source:     "github.com/example/llm-proxy-provider-myplugin",
+		Constraint: "~> 1.0",
+		Resolved:   "1.2.3",
+		Checksum:   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	})
+
+	path := filepath.Join(dir, lockfile.FileName)
+	if err := lockfile.Write(path, lf); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := lockfile.Read(path)
+	if err != nil {
+		t.Fatalf("Read after Write: %v", err)
+	}
+	entries := got.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Checksum != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
+		t.Errorf("Checksum = %q, want e3b0c...", entries[0].Checksum)
+	}
+}
+
+// TestRead_EntryWithChecksum verifies that an existing lock file that already
+// carries a checksum attribute is parsed correctly.
+func TestRead_EntryWithChecksum(t *testing.T) {
+	dir := t.TempDir()
+	p := writeLockFile(t, dir, `
+plugin "myplugin" {
+  source   = "github.com/example/llm-proxy-provider-myplugin"
+  version  = "~> 1.0"
+  resolved = "1.2.3"
+  platform = "linux_amd64"
+  checksum = "deadbeef"
+}
+`)
+	lf, err := lockfile.Read(p)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	entries := lf.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Checksum != "deadbeef" {
+		t.Errorf("Checksum = %q, want deadbeef", entries[0].Checksum)
+	}
+}
+
+// TestWrite_ChecksumOmittedWhenEmpty verifies that when Checksum is empty,
+// no checksum attribute appears in the written lock file (backwards compat).
+func TestWrite_ChecksumOmittedWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	lf := &lockfile.Lockfile{}
+	lf.Set(lockfile.Entry{
+		Name:     "myplugin",
+		Source:   "github.com/example/llm-proxy-provider-myplugin",
+		Resolved: "1.0.0",
+	})
+	p := filepath.Join(dir, lockfile.FileName)
+	if err := lockfile.Write(p, lf); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	data, _ := os.ReadFile(p)
+	if strings.Contains(string(data), "checksum") {
+		t.Errorf("lock file should not contain 'checksum' when empty:\n%s", data)
+	}
+}

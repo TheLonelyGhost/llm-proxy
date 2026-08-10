@@ -8,12 +8,14 @@
 package github
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // ErrNoMatchingRelease is returned when the API returns releases but none
@@ -22,6 +24,10 @@ var ErrNoMatchingRelease = errors.New("no matching release found")
 
 // ErrReleaseListFailed is returned when the GitHub API call fails.
 var ErrReleaseListFailed = errors.New("failed to list releases")
+
+// ErrChecksumFetchFailed is returned when the SHA256SUMS file cannot be
+// fetched or parsed.
+var ErrChecksumFetchFailed = errors.New("failed to fetch checksum file")
 
 // release is the subset of the GitHub Releases API response we care about.
 type release struct {
@@ -95,4 +101,55 @@ func ListReleaseTags(ctx context.Context, client *http.Client, repoPath string) 
 		page++
 	}
 	return tags, nil
+}
+
+// FetchChecksumFile downloads the SHA256SUMS file at url and returns a map
+// from filename to lowercase hex SHA-256 digest.
+//
+// Each line of the file is expected to be in the standard shasum(1) format:
+//
+//	<hex>  <filename>
+//
+// Lines that do not match this format (too few fields, blank lines) are
+// silently skipped. The client parameter follows the same nil-fallback
+// convention as ListReleaseTags.
+func FetchChecksumFile(ctx context.Context, client *http.Client, url string) (map[string]string, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: build request: %w", ErrChecksumFetchFailed, err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrChecksumFetchFailed, err)
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("%w: nil response", ErrChecksumFetchFailed)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrChecksumFetchFailed, resp.StatusCode, body)
+	}
+
+	out := make(map[string]string)
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 4<<20)) // 4 MiB cap
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		// Standard shasum format: "<hex>  <filename>" (two spaces) or "<hex> <filename>"
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		out[fields[1]] = strings.ToLower(fields[0])
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("%w: read body: %w", ErrChecksumFetchFailed, err)
+	}
+	return out, nil
 }

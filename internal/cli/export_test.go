@@ -34,3 +34,13 @@ func ResolvePluginVersionForTest(
 func ReadOrNewLockfileForTest(path string) (*lockfile.Lockfile, error) {
 	return readOrNewLockfile(path)
 }
+
+// DownloadAndExtractForTest exposes downloadAndExtract for tests so they can
+// inject a custom HTTP client and a checksum URL.
+func DownloadAndExtractForTest(
+	ctx context.Context,
+	client *http.Client,
+	archiveURL, checksumURL, destDir, pluginName string,
+) error {
+	return downloadAndExtract(ctx, client, archiveURL, checksumURL, destDir, pluginName)
+}

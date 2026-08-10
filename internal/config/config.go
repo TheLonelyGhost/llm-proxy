@@ -41,6 +41,11 @@ type PluginBlock struct {
 	// Version is a version constraint or exact version string
 	// (e.g. "~> 1.0" or "1.2.3").
 	Version string `hcl:"version"`
+	// ChecksumURL is the URL to the SHA256SUMS file for this plugin release.
+	// For github.com sources this is derived automatically; set this field only
+	// for custom/self-hosted release servers.
+	// Supported placeholders: {version}, {os}, {arch}.
+	ChecksumURL string `hcl:"checksum_url,optional"`
 
 	// Health-check tuning (all optional; defaults applied by ApplyDefaults).
 	HealthInterval  string `hcl:"health_interval,optional"`
