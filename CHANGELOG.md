@@ -9,6 +9,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-08-10
+
 ### Removed
 
 - **BREAKING:** `llm-proxy providers` subcommand group removed, including `llm-proxy providers list-models`. Upstream model discovery is now a plugin concern. Plugins that support it expose a `list-models` tool; replace any `llm-proxy providers list-models <backend>` calls with `llm-proxy plugin run <backend-label> list-models`. The tool is not filtered by the operator allow-list, preserving the same discovery behaviour. See `docs/plugins/authoring.md` for the plugin-author contract.
@@ -57,5 +59,6 @@ Initial public release.
 - SLSA level 3 release provenance via GitHub Actions.
 - Cross-platform CGO-free builds for `linux`, `darwin`, `windows` × `amd64`/`arm64`.
 
-[Unreleased]: https://github.com/thelonelyghost/llm-proxy/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/thelonelyghost/llm-proxy/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/thelonelyghost/llm-proxy/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/thelonelyghost/llm-proxy/releases/tag/v0.1.0
