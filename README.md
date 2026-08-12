@@ -23,7 +23,7 @@ any `Authorization` headers sent to it and injecting its own for each upstream p
 
 ```sh
 # 1. Download pre-built binary for your platform
-curl -SsLo ./llm-proxy https://github.com/TheLonelyGhost/llm-proxy/releases/download/v1.0.1/llm-proxy-linux-amd64
+curl -SsLo ./llm-proxy https://github.com/TheLonelyGhost/llm-proxy/releases/download/v1.0.0/llm-proxy-linux-amd64
 
 # 2. Install to your PATH
 install -m0755 ./llm-proxy ~/.local/bin/llm-proxy
