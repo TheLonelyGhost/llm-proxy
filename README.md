@@ -6,37 +6,42 @@ any `Authorization` headers sent to it and injecting its own for each upstream p
 
 ## Features
 
-- **OpenAI API compliance** — all backend responses are normalised to the OpenAI API
-  specification, so any OpenAI-compatible client works without modification.
-- **Prefix-based model routing** — `<backend>/<model>` (e.g. `copilot/gpt-4o`) lets
-  multiple backends coexist in one proxy instance.
-- **HCL2 configuration** — single file or directory of `*.hcl` files; `env("NAME")`
+- **Normalize to OpenAI API** -- All backend responses are converted to a format
+  matching the OpenAI API specification, so any OpenAI-compatible client works without
+  modification.
+- **Prefix-based model routing** -- `<backend-label>/<model>` (e.g. `copilot/gpt-4o`)
+  lets multiple backends coexist in one proxy instance.
+- **HCL2 configuration** -- single file or directory of `*.hcl` files; `env("NAME")`
   interpolation keeps secrets out of source control.
-- **Plugin system** — out-of-process provider plugins are downloaded, verified, and
-  lifecycle-managed by the proxy.
-- **Secure defaults** — binds to `127.0.0.1:4980`; strips client `Authorization`
-  headers; enforces request body size limits; no backend silently defaulted.
+- **Plugin system** -- out-of-process provider plugins are downloaded, verified,
+  and lifecycle-managed by the proxy.
+- **Secure defaults** -- binds to loopback (`127.0.0.1`); strips client `Authorization`
+  headers; enforces request body size limits; requires explicitly specifying model
+  (and therefore the backend).
 
 ## Quick start
 
 ```sh
-# 1. Build
-task build
+# 1. Download pre-built binary for your platform
+curl -SsLo ./llm-proxy https://github.com/TheLonelyGhost/llm-proxy/releases/download/v1.0.1/llm-proxy-linux-amd64
 
-# 2. Copy example manifest
+# 2. Install to your PATH
+install -m0755 ./llm-proxy ~/.local/bin/llm-proxy
+
+# 3. Copy example manifest
 mkdir -p ~/.config/llm-proxy
 cp ./examples/config.hcl ~/.config/llm-proxy/config.hcl
 
-# 3. Install any external plugins
+# 4. Install any external plugins
 ./bin/llm-proxy plugin install
 
-# 4. Authorize the proxy with your provider (one-time, if the plugin requires it).
-./bin/llm-proxy plugin run ibmbob login
+# 5. Authorize the proxy with your provider (one-time, if the plugin requires it).
+./bin/llm-proxy plugin run bob login
 
-# 5. Run the server.
+# 6. Run the server.
 ./bin/llm-proxy serve
 
-# 6. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
+# 7. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
 #    ask for a backend-prefixed model.
 curl http://127.0.0.1:4980/v1/chat/completions \
   -H 'Content-Type: application/json' \

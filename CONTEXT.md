@@ -25,7 +25,7 @@ A configured, named, running instance of a provider. Defined by a `backend` HCL 
 _Avoid_: provider (when referring to the instance)
 
 **Provider**:
-The implementation type that backs one or more backends (e.g. `"github-copilot"`, `"ibm-bob"`, `"openai"`). A single provider type can be instantiated as multiple backends with different names and credentials. A provider is either compiled into the core binary or delivered as a Plugin.
+The implementation type that backs one or more backends (e.g. `"openai"`). A single provider type can be instantiated as multiple backends with different names and credentials. A provider is either compiled into the core binary (currently only `"openai"`) or delivered as a Plugin (e.g. `"copilot"`, `"ibmbob"`).
 _Avoid_: backend (when referring to the implementation type)
 
 **Plugin**:

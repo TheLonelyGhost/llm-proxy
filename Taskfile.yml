@@ -46,6 +46,8 @@ tasks:
 
   build:all:
     desc: "Cross-compile for supported platforms (linux/darwin/windows × amd64/arm64)"
+    aliases:
+      - release
     cmds:
       - mkdir -p dist
       - for: { var: PLATFORMS, split: " " }
@@ -55,6 +57,9 @@ tasks:
           if [ "$OS" = "windows" ]; then EXT=".exe"; fi
           GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags="-s -w -X '{{.PKG}}/internal/cli.Version={{.VERSION}}'" \
             -o dist/{{.BINARY}}-${OS}-${ARCH}${EXT} ./cmd/{{.BINARY}}
+      - cmd: |
+          cd ./dist/
+          sha256sum {{.BINARY}}* > SHA256SUMS
     vars:
       PLATFORMS: "linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64"
 

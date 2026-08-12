@@ -9,6 +9,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pipeline no longer uses SLSA releaser, allowing multiarch builds to be uploaded to GitHub Releases
+
 ## [1.0.0] — 2026-08-10
 
 ### Removed

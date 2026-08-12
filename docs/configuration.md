@@ -2,8 +2,8 @@
 
 ## Quick start
 
-The minimal config to get `llm-proxy` running is a single backend block.
-Save this as `~/.config/llm-proxy/config.hcl` (or pass `-c <path>`):
+The minimal config to get `llm-proxy` running is a single backend block. Save this
+as `~/.config/llm-proxy/config.hcl` (or pass `-c <path>`):
 
 ```hcl
 # Use the built-in OpenAI-compatible backend
@@ -20,8 +20,8 @@ Then start the proxy:
 llm-proxy serve
 ```
 
-Point any OpenAI-compatible client at `http://127.0.0.1:4980` and prefix
-your model name with the backend label:
+Point any OpenAI-compatible client at `http://127.0.0.1:4980` and prefix your model
+name with the backend label:
 
 ```sh
 curl http://127.0.0.1:4980/v1/chat/completions \
@@ -39,13 +39,13 @@ Configuration is resolved in this order (first match wins):
 
 1. `-c` / `--config` flag
 2. `LLM_PROXY_CONFIG` environment variable
-3. `~/.config/llm-proxy/config.hcl` on Linux/macOS  
-   `C:\ProgramData\llm-proxy\config.hcl` on Windows
+3. `~/.config/llm-proxy/config.hcl` on Linux/macOS, `C:\ProgramData\llm-proxy\config.hcl`
+   on Windows
 
-The path may point at either a single `*.hcl` file or a **directory**. When a
-directory is given, every `*.hcl` file inside it (no subdirectories, no
-dot-files) is loaded and merged in lexicographic order. Conflicting attribute
-definitions across files produce a load-time error.
+The path may point at either a single `*.hcl` file or a **directory**. When a directory
+is given, every `*.hcl` file inside it (no subdirectories, no dot-files) is loaded
+and merged in lexicographic order. Conflicting attribute definitions across files
+produce a load-time error.
 
 ## Keeping secrets out of config
 
@@ -58,12 +58,12 @@ backend "openai" {
 }
 ```
 
-`env()` returns the empty string when the variable is unset; the proxy treats
-an empty provider attribute as "use the built-in default". Never hardcode
-API keys — commit only the `env()` references.
+`env()` returns the empty string when the variable is unset; the proxy treats an
+empty provider attribute as "use the built-in default". Never hardcode API keys
+-- commit only the `env()` references.
 
-> **Note:** File-reading helpers that HCL normally exposes (`file()`,
-> `fileexists()`, etc.) are deliberately disabled to reduce attack surface.
+> **Note:** File-reading helpers that HCL normally exposes (`file()`, `fileexists()`,
+> etc.) are deliberately disabled to reduce attack surface.
 
 ## Backends
 
@@ -78,16 +78,15 @@ backend "<prefix>" {
 }
 ```
 
-- **`<prefix>`** is the label clients use when selecting a model:
-  `<prefix>/<model-id>` (e.g. `openai/gpt-4o`).
-- **`type`** is either a compiled-in provider name or the label of a `plugin`
-  block.
-- **`models`** is an optional allow-list. Requests for unlisted models are
-  rejected with 404. Omitting it means no model is advertised via
-  `/v1/models`, but routing still works.
+- **`<prefix>`** is the label clients use when selecting a model: `<prefix>/<model-id>`
+  (e.g. `openai/gpt-4o`).
+- **`type`** is either a compiled-in provider name or the label of a `plugin` block.
+- **`models`** is an optional allow-list. Requests for unlisted models are rejected
+  with 404. Omitting it means no model is advertised via `/v1/models`, but routing
+  still works.
 
-You may declare any number of `backend` blocks. Labels must be unique,
-lowercase, and must not contain `/`.
+You may declare any number of `backend` blocks. Labels must be unique, lowercase,
+and must not contain `/`.
 
 See [docs/providers/](providers/) for provider-specific attributes.
 
@@ -102,17 +101,17 @@ Every request must include a `model` field of the form
 | `copilot/gpt-4o`                 | `copilot`        | `gpt-4o`              |
 | `openrouter/openai/gpt-oss-120b` | `openrouter`     | `openai/gpt-oss-120b` |
 
-Only the first `/` is significant — everything after it (including further `/`
-characters) is forwarded verbatim as the upstream model id.
+Only the first `/` is significant — everything after it (including further `/` characters)
+is forwarded verbatim as the upstream model id.
 
-There is **no default backend.** A model id missing a prefix returns HTTP 400;
-an unknown prefix returns HTTP 404.
+There is **no default backend.** A model id missing a prefix returns HTTP 400; an
+unknown prefix returns HTTP 404.
 
 ## Endpoints
 
-See [docs/endpoints.md](endpoints.md) for the full endpoint reference,
-including model capability discovery, reasoning effort levels, the responses
-endpoint input shapes, and budget / quota reporting.
+See [docs/endpoints.md](endpoints.md) for the full endpoint reference, including
+model capability discovery, reasoning effort levels, the responses endpoint input
+shapes, and budget / quota reporting.
 
 ## CLI flags
 
@@ -157,13 +156,12 @@ server {
 
 ### Plugins
 
-Plugins extend the proxy with out-of-process provider backends. See
-[docs/plugins/index.md](plugins/index.md) for the full plugin reference,
-including the `plugin` block schema, source address formats, version
-constraints, cache layout, and lifecycle management.
+Plugins extend the proxy with out-of-process provider backends. See [docs/plugins/index.md](plugins/index.md)
+for the full plugin reference, including the `plugin` block schema, source address
+formats, version constraints, cache layout, and lifecycle management.
 
-For the lock file format, resolution priority, per-platform entries, and
-upgrade behaviour, see [docs/lockfile.md](lockfile.md).
+For the lock file format, resolution priority, per-platform entries, and upgrade
+behaviour, see [docs/lockfile.md](lockfile.md).
 
 ### Tracing
 
@@ -193,49 +191,57 @@ Sampling modes:
 
 ### Body logging (DEBUG)
 
-`server.log_bodies` (default `false`) emits a DEBUG-level line containing the
-HTTP request body and response body.
+`server.log_bodies` (default `false`) emits a DEBUG-level line containing the HTTP
+request body and response body.
 
-**Both** `server.log_bodies = true` **and** `--log-level debug` must be set;
-either alone is a no-op.
+**Both** `server.log_bodies = true` **and** `--log-level debug` must be set; either
+alone is a no-op.
 
 Additional behaviour:
 
-- Bodies are capped at 64 KiB; larger bodies are truncated and the log entry
-  carries `request_body_truncated=true` / `response_body_truncated=true`.
+- Bodies are capped at 64 KiB; larger bodies are truncated and the log entry carries
+  `request_body_truncated=true` / `response_body_truncated=true`.
 - **Streaming responses are never captured.** The log records
   `response_body=<streaming: not captured>` so SSE is not buffered.
 - The proxy emits a `WARN` at startup whenever this flag is on.
 
-> **Security.** Request and response bodies routinely contain prompts, chat
-> history, tool output, and sometimes credentials. With `log_bodies = true`
-> the proxy's log stream **must** be treated as a secret — protect it with the
-> same controls you apply to the upstream API keys. Do not enable this in
-> production unless you have a concrete, time-bounded debugging need.
+> **Security.** Request and response bodies routinely contain prompts, chat history,
+> tool output, and sometimes credentials. With `log_bodies = true` the proxy's log
+> stream **must** be treated as a secret — protect it with the same controls you
+> apply to the upstream API keys. Do not enable this in production unless you have
+> a concrete, time-bounded debugging need.
 
 ### On-disk state
 
-The proxy is deliberately near-stateless. The only files it writes are:
+The proxy core is deliberately near-stateless. The files it writes are:
 
-| File                                                       | Purpose                              | Mode |
-| ---------------------------------------------------------- | ------------------------------------ | ---- |
-| `<user-config-dir>/llm-proxy/<provider>_token.json`        | Long-lived auth token                | 0600 |
-| `<user-cache-dir>/llm-proxy/<provider>_token.json`         | Short-lived / refreshed token        | 0600 |
+| File                                                                                          | Purpose                                    | Mode |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------ | ---- |
+| `<cache-dir>/llm-proxy/plugins/<ns>/<name>/<ver>/<os>_<arch>/llm-proxy-provider-<name>`      | Installed plugin binary                    | 0755 |
+| `<cache-dir>/llm-proxy/plugins/<ns>/<name>/<ver>/<os>_<arch>/llm-proxy-provider-<name>.manifest.json` | Plugin manifest                   | 0644 |
+| `<cache-dir>/llm-proxy/models-<backend>.json`                                                 | Model catalogue cache (TTL: 24 h)          | 0644 |
+| `<config-dir>/llm-proxy/llm-proxy.lock.hcl`                                                  | Plugin version lock (written by `plugin install`, verified by `serve`) | 0644 |
+
+> **Authorization tokens are not written by the core.** Credential storage is entirely
+> the responsibility of each plugin. Plugins that persist credentials on disk are
+> required to use `paths.WriteSecret` (mode 0600) and store under `<config-dir>/llm-proxy/`.
+> Consult each plugin's documentation for the files it creates and how to remove
+> them.
 
 Platform paths:
 
-| OS      | Config dir                              | Cache dir                              |
-| ------- | --------------------------------------- | -------------------------------------- |
-| Linux   | `~/.config/llm-proxy/`                  | `~/.cache/llm-proxy/`                  |
-| macOS   | `~/Library/Application Support/llm-proxy/` | `~/Library/Caches/llm-proxy/`      |
-| Windows | `%AppData%\llm-proxy\`                  | `%LocalAppData%\llm-proxy\`            |
+| OS      | Config dir              | Cache dir                   |
+| ------- | ----------------------- | --------------------------- |
+| Linux   | `~/.config/llm-proxy/`  | `~/.cache/llm-proxy/`       |
+| macOS   | `~/.config/llm-proxy/`  | `~/.cache/llm-proxy/`       |
+| Windows | `%AppData%\llm-proxy\`  | `%LocalAppData%\llm-proxy\` |
 
 Both directories are created with mode `0700` on first use.
 
 ### Model capability discovery and budget reporting
 
-See [docs/endpoints.md](endpoints.md) for details on `/v1/model/info`
-(capability fields, token limits, reasoning effort levels) and
-`/v1/usage/budget` (response shape, special values, per-backend targeting).
+See [docs/endpoints.md](endpoints.md) for details on `/v1/model/info` (capability
+fields, token limits, reasoning effort levels) and `/v1/usage/budget` (response
+shape, special values, per-backend targeting).
 
 [hcl]: https://github.com/hashicorp/hcl
