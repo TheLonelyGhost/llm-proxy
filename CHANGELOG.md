@@ -9,6 +9,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+...
+
+## [1.1.0] — 2026-10-20
+
 ### Added
 
 - Plugin sidecars started by `llm-proxy serve` now receive `LLM_PROXY_BACKEND_LABEL`, `LLM_PROXY_BACKEND_TYPE`, and `LLM_PROXY_BACKEND_CONFIG`, so a plugin can read its `backend` block attributes at serve time and not only in `plugin run`.
