@@ -26,8 +26,10 @@ jobs:
       - name: Build & package all platforms
         env:
           BINARY: llm-proxy
+          PKG: github.com/thelonelyghost/llm-proxy
           CGO_ENABLED: "0"
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist/
           PLATFORMS='linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64'
           for PLATFORM in $PLATFORMS; do
@@ -39,8 +41,8 @@ jobs:
             OUT="${BINARY}-${GOOS}-${GOARCH}${EXT}"
 
             go build -trimpath \
-              -ldflags="-s -w -X '{{.PKG}}/internal/cli.Version={{.VERSION}}'"
-              -o "dist/${OUT}"
+              -ldflags="-s -w -X '${PKG}/internal/cli.Version=${VERSION}'" \
+              -o "dist/${OUT}" "./cmd/${BINARY}"
           done
 
           cd ./dist/
