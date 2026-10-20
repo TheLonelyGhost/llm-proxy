@@ -19,6 +19,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - List, map, and object attributes in `LLM_PROXY_BACKEND_CONFIG` are now encoded as JSON arrays and objects instead of Go-syntax strings.
 - Responses from plugin sidecars are no longer cut off after 60 seconds; long streams and slow generations now run until they complete or the client disconnects.
 
+### Security
+
+- Built with Go 1.26.10, which fixes standard-library vulnerabilities in `net/http`, `net/url`, `net/textproto`, `crypto/tls`, and `encoding/asn1`.
+
 ## [1.0.0] — 2026-08-10
 
 ### Removed
