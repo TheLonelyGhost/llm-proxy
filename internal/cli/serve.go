@@ -266,6 +266,13 @@ func buildSidecarBackend(ctx context.Context, b config.BackendBlock, pb config.P
 		return nil, fmt.Errorf("plugin %q: parse manifest: %w", pb.Name, err)
 	}
 
+	// Give the sidecar the same backend context that `plugin run` passes to
+	// tool invocations, so it can read its HCL attributes at serve time.
+	backendEnv, err := buildBackendEnv(b)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %q: backend config: %w", pb.Name, err)
+	}
+
 	// Pick a free loopback port for the sidecar.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -279,6 +286,7 @@ func buildSidecarBackend(ctx context.Context, b config.BackendBlock, pb config.P
 		BinaryPath:            binPath,
 		PortEnvVar:            mani.PortEnvVar,
 		AssignedPort:          assignedPort,
+		Env:                   backendEnv,
 		HealthPath:            mani.Endpoints.Health,
 		HealthInterval:        200 * time.Millisecond,
 		HealthTimeout:         5 * time.Second,

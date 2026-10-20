@@ -9,9 +9,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Plugin sidecars started by `llm-proxy serve` now receive `LLM_PROXY_BACKEND_LABEL`, `LLM_PROXY_BACKEND_TYPE`, and `LLM_PROXY_BACKEND_CONFIG`, so a plugin can read its `backend` block attributes at serve time and not only in `plugin run`.
+
 ### Fixed
 
 - Pipeline no longer uses SLSA releaser, allowing multiarch builds to be uploaded to GitHub Releases
+- List, map, and object attributes in `LLM_PROXY_BACKEND_CONFIG` are now encoded as JSON arrays and objects instead of Go-syntax strings.
+- Responses from plugin sidecars are no longer cut off after 60 seconds; long streams and slow generations now run until they complete or the client disconnects.
+
+### Security
+
+- Built with Go 1.26.10, which fixes standard-library vulnerabilities in `net/http`, `net/url`, `net/textproto`, `crypto/tls`, and `encoding/asn1`.
 
 ## [1.0.0] — 2026-08-10
 

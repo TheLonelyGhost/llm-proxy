@@ -290,3 +290,73 @@ func TestSidecar_ImplementsToolRunner(t *testing.T) {
 	}
 	var _ backend.ToolRunner = b
 }
+
+// TestSidecar_New_DefaultClientHasNoTimeout verifies that the default HTTP
+// client sets no total timeout, so long streams are not cut off.
+func TestSidecar_New_DefaultClientHasNoTimeout(t *testing.T) {
+	b, err := sidecar.New(sidecar.Options{Name: "testplugin", BaseURL: "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("sidecar.New: %v", err)
+	}
+	if got := b.HTTPClientForTest().Timeout; got != 0 {
+		t.Errorf("default client Timeout = %v, want 0 (no total timeout)", got)
+	}
+}
+
+// roundTripFunc adapts a function to http.RoundTripper.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestSidecar_New_HTTPClientOverride verifies that Options.HTTPClient is used
+// for requests instead of the default client.
+func TestSidecar_New_HTTPClientOverride(t *testing.T) {
+	var called bool
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    r,
+		}, nil
+	})}
+	b, err := sidecar.New(sidecar.Options{Name: "testplugin", BaseURL: "http://sidecar.invalid", HTTPClient: client})
+	if err != nil {
+		t.Fatalf("sidecar.New: %v", err)
+	}
+	resp, err := b.Chat(context.Background(), backend.ChatRequest{Body: []byte(`{}`)})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	_ = resp.Body.Close()
+	if !called {
+		t.Error("custom HTTPClient was not used")
+	}
+}
+
+// TestSidecar_Chat_BoundedByContext verifies that a request to a sidecar that
+// never answers ends when the caller's context is cancelled.
+func TestSidecar_Chat_BoundedByContext(t *testing.T) {
+	started := make(chan struct{})
+	handler := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// Drain the body so the server watches the connection and cancels
+		// r.Context() when the client goes away.
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		<-r.Context().Done()
+	})
+	b := newTestSidecar(t, handler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	_, err := b.Chat(ctx, backend.ChatRequest{Body: []byte(`{}`)})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Chat error = %v, want context.Canceled", err)
+	}
+}

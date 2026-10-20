@@ -144,12 +144,15 @@ constraint syntax.
 For each declared plugin, `llm-proxy serve`:
 
 1. Assigns a free ephemeral TCP port and sets `LLM_PROXY_PLUGIN_PORT=<port>`.
-2. Launches the plugin binary.
-3. Polls `GET /healthz` until HTTP 200 (readiness).
-4. Routes backend traffic to `http://127.0.0.1:<port>`.
-5. On SIGHUP: sends `POST /management/reload` to the plugin.
-6. On crash: restarts per `restart_policy` with exponential backoff.
-7. On shutdown: sends SIGTERM, waits up to `server.shutdown_timeout`, then SIGKILL.
+2. Sets `LLM_PROXY_BACKEND_LABEL`, `LLM_PROXY_BACKEND_TYPE`, and
+   `LLM_PROXY_BACKEND_CONFIG` from the `backend` block (see
+   [Backend context environment variables](authoring.md#backend-context-environment-variables)).
+3. Launches the plugin binary.
+4. Polls `GET /healthz` until HTTP 200 (readiness).
+5. Routes backend traffic to `http://127.0.0.1:<port>`.
+6. On SIGHUP: sends `POST /management/reload` to the plugin.
+7. On crash: restarts per `restart_policy` with exponential backoff.
+8. On shutdown: sends SIGTERM, waits up to `server.shutdown_timeout`, then SIGKILL.
 
 ## Tooling subcommands
 

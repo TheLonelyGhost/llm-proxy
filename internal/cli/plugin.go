@@ -663,7 +663,8 @@ func newPluginRunCmd(out, errOut io.Writer) *cobra.Command {
 }
 
 // buildBackendEnv constructs the extra environment variables that are
-// forwarded to the plugin process when `plugin run` is used. It sets:
+// forwarded to the plugin process, both for `plugin run` tool invocations and
+// for the sidecar launched by `serve`. It sets:
 //
 //	LLM_PROXY_BACKEND_LABEL  – the backend block label (e.g. "ollama")
 //	LLM_PROXY_BACKEND_TYPE   – the plugin type (e.g. "copilot")

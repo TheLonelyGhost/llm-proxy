@@ -74,6 +74,10 @@ type Config struct {
 	PortEnvVar string
 	// AssignedPort is the TCP port the plugin should bind to.
 	AssignedPort int
+	// Env lists extra "KEY=value" entries appended to the inherited
+	// environment of the plugin process. PortEnvVar is set after Env, so an
+	// entry in Env cannot override the assigned port.
+	Env []string
 
 	// HealthPath is the HTTP path polled for readiness/liveness (e.g. "/healthz").
 	HealthPath string
@@ -171,9 +175,8 @@ func (r *Runner) Start(ctx context.Context) error {
 	}
 
 	cmd := exec.Command(r.cfg.BinaryPath) //nolint:gosec // operator-controlled binary path
-	cmd.Env = append(cmd.Environ(),
-		r.cfg.PortEnvVar+"="+strconv.Itoa(r.cfg.AssignedPort),
-	)
+	cmd.Env = append(cmd.Environ(), r.cfg.Env...)
+	cmd.Env = append(cmd.Env, r.cfg.PortEnvVar+"="+strconv.Itoa(r.cfg.AssignedPort))
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("plugin %q: start process: %w", r.cfg.Name, err)
 	}

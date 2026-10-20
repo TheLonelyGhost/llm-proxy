@@ -1,8 +1,10 @@
 package config_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -246,6 +248,68 @@ backend "mybackend" {
 		if !strings.Contains(got, want) {
 			t.Errorf("BackendConfigJSON missing %s: %s", want, got)
 		}
+	}
+}
+
+// TestBackendConfigJSON_ComplexAttributes verifies that list, map, object and
+// null attributes are encoded as plain JSON values, not Go syntax.
+func TestBackendConfigJSON_ComplexAttributes(t *testing.T) {
+	cases := []struct {
+		name string
+		attr string
+		want any
+	}{
+		{
+			name: "list",
+			attr: `allowed = ["a", "b"]`,
+			want: []any{"a", "b"},
+		},
+		{
+			name: "map",
+			attr: `headers = { "X-Team" = "llm", retries = 2 }`,
+			want: map[string]any{"X-Team": "llm", "retries": float64(2)},
+		},
+		{
+			name: "nested object in list",
+			attr: `routes = [{ name = "a", weight = 1.5, on = true }]`,
+			want: []any{map[string]any{"name": "a", "weight": 1.5, "on": true}},
+		},
+		{
+			name: "null",
+			attr: `extra = null`,
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeFile(t, t.TempDir(), "c.hcl", `
+backend "mybackend" {
+  type = "myplugin"
+  `+tc.attr+`
+}
+`)
+			cfg, err := config.Load(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			raw, err := config.BackendConfigJSON(cfg.Backends[0])
+			if err != nil {
+				t.Fatalf("BackendConfigJSON: %v", err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatalf("output is not valid JSON: %v\n%s", err, raw)
+			}
+			key, _, _ := strings.Cut(tc.attr, " ")
+			val, ok := got[key]
+			if !ok {
+				t.Fatalf("key %q missing: %s", key, raw)
+			}
+			if !reflect.DeepEqual(val, tc.want) {
+				t.Errorf("%s = %#v, want %#v", key, val, tc.want)
+			}
+		})
 	}
 }
 

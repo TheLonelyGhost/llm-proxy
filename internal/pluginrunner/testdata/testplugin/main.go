@@ -1,6 +1,7 @@
 // Command testplugin is a minimal HTTP sidecar used by pluginrunner tests.
-// It reads LLM_PROXY_PLUGIN_PORT, binds to that port, and serves /healthz
-// and /management/reload. It exits cleanly on SIGTERM.
+// It reads LLM_PROXY_PLUGIN_PORT, binds to that port, and serves /healthz,
+// /management/reload, and /env (which returns the value of the environment
+// variable named by the "key" query parameter). It exits cleanly on SIGTERM.
 package main
 
 import (
@@ -28,6 +29,11 @@ func main() {
 	mux.HandleFunc("/management/reload", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintln(w, "reloaded")
+	})
+
+	mux.HandleFunc("/env", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, os.Getenv(r.URL.Query().Get("key")))
 	})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
