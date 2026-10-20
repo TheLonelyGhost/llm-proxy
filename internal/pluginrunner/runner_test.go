@@ -3,6 +3,7 @@ package pluginrunner_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -86,6 +88,78 @@ func TestRunner_StartStop(t *testing.T) {
 	}
 	if err := r.Stop(ctx); err != nil {
 		t.Errorf("Stop: %v", err)
+	}
+}
+
+// TestRunner_Start_Env verifies that Config.Env entries reach the plugin
+// process environment and that the assigned port cannot be overridden by them.
+func TestRunner_Start_Env(t *testing.T) {
+	bin := buildTestHelper(t)
+
+	cases := []struct {
+		name     string
+		env      []string
+		key      string
+		want     string
+		wantPort bool // want the assigned port instead of want
+	}{
+		{
+			name: "extra entry reaches child",
+			env:  []string{"LLM_PROXY_TEST_VALUE=hello"},
+			key:  "LLM_PROXY_TEST_VALUE",
+			want: "hello",
+		},
+		{
+			name:     "assigned port wins over Env",
+			env:      []string{"LLM_PROXY_PLUGIN_PORT=1"},
+			key:      "LLM_PROXY_PLUGIN_PORT",
+			wantPort: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			port := freePort(t)
+			r := pluginrunner.New(pluginrunner.Config{
+				Name:            "testplugin",
+				BinaryPath:      bin,
+				PortEnvVar:      "LLM_PROXY_PLUGIN_PORT",
+				AssignedPort:    port,
+				Env:             tc.env,
+				HealthInterval:  50 * time.Millisecond,
+				HealthTimeout:   2 * time.Second,
+				RestartPolicy:   pluginrunner.RestartNever,
+				ShutdownTimeout: 5 * time.Second,
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := r.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(func() { _ = r.Stop(context.Background()) })
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.BaseURL()+"/env?key="+tc.key, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET /env: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			want := tc.want
+			if tc.wantPort {
+				want = strconv.Itoa(port)
+			}
+			if got := string(body); got != want {
+				t.Errorf("child %s = %q, want %q", tc.key, got, want)
+			}
+		})
 	}
 }
 

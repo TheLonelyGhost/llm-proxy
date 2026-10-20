@@ -18,6 +18,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 // Config is the top-level configuration document.
@@ -321,9 +322,13 @@ func BackendConfigJSON(b BackendBlock) (string, error) {
 		case cty.Bool:
 			out[k] = val.True()
 		default:
-			// For complex types (lists, maps, objects) fall back to the string
-			// representation so plugins can parse it themselves if needed.
-			out[k] = val.GoString()
+			// Complex types (lists, tuples, maps, objects) and null are
+			// encoded as their natural JSON form, without cty type information.
+			raw, err := ctyjson.SimpleJSONValue{Value: val}.MarshalJSON()
+			if err != nil {
+				return "", fmt.Errorf("backend %q: encode attribute %q: %w", b.Name, k, err)
+			}
+			out[k] = json.RawMessage(raw)
 		}
 	}
 

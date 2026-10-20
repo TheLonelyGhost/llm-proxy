@@ -28,6 +28,13 @@ Return **501 Not Implemented** (not 404) for endpoints you do not support:
 > not supported" error for clients. A 404 is ambiguous with a routing error
 > and produces a confusing error message.
 
+## Response duration
+
+llm-proxy does not set a total time limit on requests to your sidecar. A
+request continues until your sidecar completes the response or the client
+disconnects. Long streams and slow non-streaming responses are not cut off.
+When the client disconnects, llm-proxy cancels the request to your sidecar.
+
 ## Port binding
 
 llm-proxy assigns a free ephemeral port and passes it via the environment
@@ -39,6 +46,52 @@ port := os.Getenv("LLM_PROXY_PLUGIN_PORT")
 ln, _ := net.Listen("tcp", "127.0.0.1:" + port)
 ```
 
+## Backend context environment variables
+
+llm-proxy sets three environment variables when it starts your binary. It sets
+them in sidecar mode (`llm-proxy serve`) and in tooling mode
+(`llm-proxy plugin run`). Use them to find the backend instance that your
+binary operates for.
+
+| Variable | Value |
+|---|---|
+| `LLM_PROXY_BACKEND_LABEL` | The `backend` block label (e.g. `ollama`) |
+| `LLM_PROXY_BACKEND_TYPE` | The plugin type name (e.g. `copilot`) |
+| `LLM_PROXY_BACKEND_CONFIG` | JSON object with all backend attributes |
+
+`LLM_PROXY_BACKEND_CONFIG` is a JSON object. Its keys are `name`, `type`,
+`models` (if the block sets it), and each provider-specific attribute in the
+`backend` block. llm-proxy evaluates `env()` references before it encodes the
+object. It encodes each attribute as follows:
+
+- A string, number, or bool becomes a JSON string, number, or bool.
+- A list or tuple becomes a JSON array.
+- A map or object becomes a JSON object.
+- `null` becomes JSON `null`.
+
+For example, this block:
+
+```hcl
+backend "ollama" {
+  type     = "openrouter"
+  base_url = "http://localhost:11434"
+  models   = ["llama3"]
+  headers  = { "X-Team" = "llm" }
+}
+```
+
+gives this value:
+
+```json
+{"base_url":"http://localhost:11434","headers":{"X-Team":"llm"},"models":["llama3"],"name":"ollama","type":"openrouter"}
+```
+
+Use these variables to select the correct credential file, endpoint URL, or
+other instance-specific configuration. Two backends can use the same plugin
+type (e.g. `ollama` and `cloud` both use `type = "openrouter"`). In sidecar
+mode, llm-proxy starts one process for each `backend` block.
+`LLM_PROXY_BACKEND_LABEL` tells each process which backend it operates for.
+
 ## Tooling mode
 
 Your binary may expose CLI tooling subcommands. llm-proxy invokes them as:
@@ -49,30 +102,6 @@ your-binary --tool <subcommand> [args...]
 
 stdin/stdout/stderr are passed through directly. Implement `--tool` as a
 top-level flag or subcommand that dispatches to the named function and exits.
-
-### Backend context environment variables
-
-Before exec-ing your binary, llm-proxy sets three environment variables so your
-tool knows which backend instance it is running for:
-
-| Variable | Value |
-|---|---|
-| `LLM_PROXY_BACKEND_LABEL` | The `backend` block label (e.g. `ollama`) |
-| `LLM_PROXY_BACKEND_TYPE` | The plugin type name (e.g. `copilot`) |
-| `LLM_PROXY_BACKEND_CONFIG` | JSON object with all backend attributes |
-
-`LLM_PROXY_BACKEND_CONFIG` is a JSON object whose keys are `name`, `type`, and
-every provider-specific attribute declared in the `backend` block with `env()`
-references already evaluated. A typical value looks like:
-
-```json
-{"name":"ollama","type":"openrouter","base_url":"http://localhost:11434"}
-```
-
-Use these variables to select the correct credential file, endpoint URL, or any
-other instance-specific configuration. When two backends reference the same
-plugin type (e.g. `ollama` and `cloud` both use `type = "openrouter"`),
-`LLM_PROXY_BACKEND_LABEL` tells your tool which one to operate on.
 
 ### The `login` convention
 

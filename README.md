@@ -55,6 +55,7 @@ curl http://127.0.0.1:4980/v1/chat/completions \
 | OpenAI-compatible | `openai` (built-in) | [docs/providers/openai.md](docs/providers/openai.md) |
 | GitHub Copilot | plugin | [llm-proxy-provider-copilot](https://github.com/thelonelyghost/llm-proxy-provider-copilot) |
 | IBM Bob | plugin | [llm-proxy-provider-ibmbob](https://github.com/thelonelyghost/llm-proxy-provider-ibmbob) |
+| Claude Code | plugin | [llm-proxy-provider-claudecode](https://github.com/thelonelyghost/llm-proxy-provider-claudecode) |
 
 Plugin backends are declared with a `plugin` block and installed with
 `llm-proxy plugin install` before starting the server. See

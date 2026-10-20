@@ -15,15 +15,10 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/thelonelyghost/llm-proxy/internal/backend"
 	"github.com/thelonelyghost/llm-proxy/internal/plugin"
 )
-
-// DefaultRequestTimeout is the per-request HTTP timeout used when no explicit
-// timeout is configured.
-const DefaultRequestTimeout = 60 * time.Second
 
 // Options configures a sidecar Backend.
 type Options struct {
@@ -32,8 +27,9 @@ type Options struct {
 	// BaseURL is the HTTP base URL of the sidecar process (e.g.
 	// "http://127.0.0.1:9001"). Must be non-empty.
 	BaseURL string
-	// HTTPClient overrides the default HTTP client. If nil a client with
-	// DefaultRequestTimeout is used.
+	// HTTPClient overrides the default HTTP client. If nil a client with no
+	// total timeout is used, so streamed and slow responses are not cut off;
+	// each request is bounded by the context passed to it instead.
 	HTTPClient *http.Client
 	// BinaryPath is the absolute path to the plugin binary. Required for
 	// RunTool; may be empty when tool invocation is not needed.
@@ -64,7 +60,7 @@ func New(opts Options) (*Backend, error) {
 	}
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: DefaultRequestTimeout}
+		client = &http.Client{}
 	}
 	toolSet := make(map[string]struct{}, len(opts.Tools))
 	for _, t := range opts.Tools {
