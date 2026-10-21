@@ -63,6 +63,17 @@ Other tools you must have on PATH:
    `internal/paths.ConfigDir()` for long-lived credentials and
    `internal/paths.CacheDir()` for short-lived caches.
 
+8. **Keep `scripts/install.sh` in step with release artifacts.** The script
+   downloads `llm-proxy-<GOOS>-<GOARCH>` and looks it up in the release
+   `SHA256SUMS`. When you add, remove, or rename a GOOS/GOARCH target in
+   `.github/workflows/release.yml` (and `Taskfile.yml` `build:all`):
+   - Update `detect_target` in `scripts/install.sh` so the platform's
+     `uname -s` and `uname -m` values map to its GOOS and GOARCH names.
+   - Keep the asset name pattern and `SHA256SUMS` in the release, or change
+     the script to match.
+   - Update the install notes in `README.md`.
+   - The script must stay POSIX `sh` and pass `shellcheck scripts/install.sh`.
+
 ## Architecture
 
 The proxy is a thin front door over a pluggable `backend.Backend` interface.

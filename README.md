@@ -19,29 +19,54 @@ any `Authorization` headers sent to it and injecting its own for each upstream p
   headers; enforces request body size limits; requires explicitly specifying model
   (and therefore the backend).
 
+## Install
+
+The quickest way to install the latest release is the install script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/TheLonelyGhost/llm-proxy/main/scripts/install.sh | sh
+```
+
+The script:
+
+- Installs `llm-proxy` to `~/.local/bin`, or to `/usr/local/bin` for the `root` user.
+- Verifies the download against the release checksums, if a checksum tool is available.
+
+For all options, such as how to install a specific version, see the comments
+at the top of [`scripts/install.sh`](scripts/install.sh).
+
+Other ways to install:
+
+- Download the binary for your platform from the
+  [latest release](https://github.com/TheLonelyGhost/llm-proxy/releases/latest).
+  Each release has a `SHA256SUMS` file to verify the download.
+- Build from source with Go:
+
+  ```sh
+  CGO_ENABLED=0 go install github.com/thelonelyghost/llm-proxy/cmd/llm-proxy@latest
+  ```
+
 ## Quick start
 
 ```sh
-# 1. Download pre-built binary for your platform
-curl -SsLo ./llm-proxy https://github.com/TheLonelyGhost/llm-proxy/releases/download/v1.0.0/llm-proxy-linux-amd64
+# 1. Install llm-proxy (see "Install" above).
+curl -fsSL https://raw.githubusercontent.com/TheLonelyGhost/llm-proxy/main/scripts/install.sh | sh
 
-# 2. Install to your PATH
-install -m0755 ./llm-proxy ~/.local/bin/llm-proxy
-
-# 3. Copy example manifest
+# 2. Download the example configuration.
 mkdir -p ~/.config/llm-proxy
-cp ./examples/config.hcl ~/.config/llm-proxy/config.hcl
+curl -fsSLo ~/.config/llm-proxy/config.hcl \
+  https://raw.githubusercontent.com/TheLonelyGhost/llm-proxy/main/examples/config.hcl
 
-# 4. Install any external plugins
-./bin/llm-proxy plugin install
+# 3. Install any external plugins
+llm-proxy plugin install
 
-# 5. Authorize the proxy with your provider (one-time, if the plugin requires it).
-./bin/llm-proxy plugin run bob login
+# 4. Authorize the proxy with your provider (one-time, if the plugin requires it).
+llm-proxy plugin run bob login
 
-# 6. Run the server.
-./bin/llm-proxy serve
+# 5. Run the server.
+llm-proxy serve
 
-# 7. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
+# 6. From any OpenAI-compatible client, point at http://127.0.0.1:4980 and
 #    ask for a backend-prefixed model.
 curl http://127.0.0.1:4980/v1/chat/completions \
   -H 'Content-Type: application/json' \
