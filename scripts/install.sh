@@ -26,6 +26,11 @@
 #   - Verifies the binary against the release SHA256SUMS with sha256sum,
 #     gsha256sum, shasum, or sha256. Stops on a mismatch, or when the release
 #     has no SHA256SUMS. Warns, with an install hint, when no tool is found.
+#   - On macOS, removes the com.apple.quarantine attribute from a verified
+#     binary before it replaces the destination, so that Gatekeeper does not
+#     block the first run. Stops, and keeps the existing binary, when xattr
+#     cannot remove the attribute. Keeps the attribute, with a warning, when
+#     the download was not verified.
 #   - Stops with a "go install" command when the release has no binary for
 #     this OS and CPU. On Windows, download the .exe from the releases page.
 #
@@ -203,6 +208,11 @@ expected_sha256() (
   exit 1
 )
 
+# quarantined FILE succeeds when FILE has the macOS com.apple.quarantine
+# attribute. Homebrew detects quarantine the same way, with "xattr -p". A
+# missing xattr counts as no quarantine.
+quarantined() { xattr -p com.apple.quarantine "$1" >/dev/null 2>&1; }
+
 # latest_version TOOL DIR prints the tag of the latest release. The GitHub
 # "latest release" endpoint skips drafts and prereleases.
 latest_version() (
@@ -305,6 +315,7 @@ main() {
   build_hint="To build from source with Go, run: CGO_ENABLED=0 go install ${MODULE}/cmd/${BINARY}@${version}"
 
   checksum_tool="$(detect_checksum_tool)"
+  verified=''
   if [ -z "$checksum_tool" ]; then
     warn "No SHA-256 tool found (sha256sum, gsha256sum, shasum or sha256). The download will not be verified."
     warn "To install one: $(install_hint "$platform" checksum)"
@@ -330,6 +341,7 @@ main() {
     verify_sha256 "$checksum_tool" "$platform" "$TMP_DIR" "$asset" "$want" ||
       die "Checksum mismatch for ${asset}: expected ${want}. Do not use this download."
     log "Verified SHA-256 checksum with ${checksum_tool}."
+    verified=1
   fi
 
   if [ "$(id -u)" -eq 0 ]; then
@@ -355,6 +367,17 @@ main() {
   # the destination is never missing or partly written.
   STAGED="$(mktemp "${install_dir}/.${BINARY}.XXXXXX")"
   install -m 0755 "${TMP_DIR}/${asset}" "$STAGED"
+  # Gatekeeper blocks the first run of a quarantined binary. Remove the
+  # attribute as Homebrew does, with "xattr -d", but only from a verified
+  # download.
+  if [ "$platform" = macos ] && quarantined "$STAGED"; then
+    if [ -n "$verified" ]; then
+      xattr -d com.apple.quarantine "$STAGED" ||
+        die "Cannot remove the macOS quarantine attribute from the downloaded ${BINARY}. ${dest} is not changed."
+    else
+      warn "The download was not verified, so ${BINARY} keeps the macOS quarantine attribute. macOS can block its first run."
+    fi
+  fi
   mv -f "$STAGED" "$dest"
   STAGED=''
 

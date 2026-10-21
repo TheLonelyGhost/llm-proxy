@@ -12,6 +12,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `scripts/install.sh` installs the latest release, or a specified version, to `~/.local/bin` (`/usr/local/bin` for `root`) with one `curl ... | sh` command, and verifies the download against the release `SHA256SUMS` file.
+- On macOS, `scripts/install.sh` removes the `com.apple.quarantine` attribute from a verified download, so Gatekeeper does not block the first run of `llm-proxy`.
 
 ## [1.1.0] — 2026-10-20
 
