@@ -23,9 +23,28 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Determine version
+        id: version
+        run: |
+          # Tag builds use the tag (minus its "v"); anything else is an edge
+          # build named after the short commit SHA.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="edge-$(git rev-parse --short HEAD)"
+            TAG="${VERSION}"
+          fi
+          {
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build & package all platforms
         env:
           BINARY: llm-proxy
+          PKG: github.com/thelonelyghost/llm-proxy
+          VERSION: ${{ steps.version.outputs.version }}
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist/
@@ -39,8 +58,8 @@ jobs:
             OUT="${BINARY}-${GOOS}-${GOARCH}${EXT}"
 
             go build -trimpath \
-              -ldflags="-s -w -X '{{.PKG}}/internal/cli.Version={{.VERSION}}'"
-              -o "dist/${OUT}"
+              -ldflags="-s -w -X '${PKG}/internal/cli.Version=${VERSION}'" \
+              -o "dist/${OUT}" "./cmd/${BINARY}"
           done
 
           cd ./dist/
@@ -49,8 +68,15 @@ jobs:
       - name: Create GitHub Release and upload
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "Release ${GITHUB_REF_NAME}" \
+          EXTRA=()
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            # Edge build: the tag does not exist yet, so pin it to the built commit.
+            EXTRA=(--target "${GITHUB_SHA}" --prerelease)
+          fi
+          gh release create "${TAG}" \
+            --title "Release ${TAG}" \
             --generate-notes \
+            "${EXTRA[@]}" \
             ./dist/*
