@@ -9,7 +9,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-...
+### Added
+
+- `scripts/install.sh` installs the latest release, or a specified version, to `~/.local/bin` (`/usr/local/bin` for `root`) with one `curl ... | sh` command, and verifies the download against the release `SHA256SUMS` file.
 
 ## [1.1.0] — 2026-10-20
 

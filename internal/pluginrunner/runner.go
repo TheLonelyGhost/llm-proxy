@@ -252,9 +252,13 @@ func (r *Runner) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Wait with timeout, then SIGKILL.
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	// Wait with timeout, then SIGKILL. The exit status of a signalled process
+	// is not an error for Stop, so only the exit itself is observed.
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
 
 	deadline := time.After(r.cfg.ShutdownTimeout)
 	select {
