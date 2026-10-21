@@ -76,7 +76,7 @@ jobs:
             EXTRA=(--target "${GITHUB_SHA}" --prerelease)
           fi
           gh release create "${TAG}" \
-            --title "Release ${TAG}" \
+            --title "${TAG}" \
             --generate-notes \
             "${EXTRA[@]}" \
             ./dist/*
