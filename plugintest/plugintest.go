@@ -141,8 +141,11 @@ func Run(t *testing.T, opts Options) {
 			t.Skip("process not running")
 		}
 		sigterm(t, cmd)
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
+		done := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
 		select {
 		case <-done:
 			// clean exit — pass
